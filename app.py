@@ -113,14 +113,74 @@ def save_portfolio(df: pd.DataFrame):
 
 @st.cache_data
 def fetch_price_history(tickers, start, end):
-    """yfinance로 Adj Close 받아오기"""
-    if len(tickers) == 0:
+    """yfinance로 Adj Close/Close 가져오기 (여러 구조 대응 + 예외 방어)"""
+    # 1) 티커 리스트 비었으면 바로 종료
+    if not tickers:
         return pd.DataFrame()
-    data = yf.download(tickers, start=start, end=end)["Adj Close"]
-    # 단일 티커일 때는 Series가 나오므로 DF로 변환
-    if isinstance(data, pd.Series):
-        data = data.to_frame()
-    return data
+
+    # 문자열 하나 들어온 경우 대비
+    if isinstance(tickers, str):
+        tickers = [tickers]
+
+    # 2) yfinance 다운로드
+    data = yf.download(
+        tickers,
+        start=start,
+        end=end,
+        progress=False,
+        group_by="column",   # 컬럼 기준으로 묶이게 강제
+        auto_adjust=False,
+    )
+
+    # 3) 빈 데이터인 경우
+    if data is None or len(data) == 0:
+        return pd.DataFrame()
+
+    # 4) 컬럼 구조에 따라 Adj Close / Close 뽑기
+    #    (단일티커 / 멀티티커 / MultiIndex 전부 대응)
+
+    # ---- MultiIndex 컬럼인 경우 ----
+    if isinstance(data.columns, pd.MultiIndex):
+        # level 0에 필드 이름이 있는 형태 (기존 방식)
+        level0 = list(data.columns.get_level_values(0))
+        level1 = list(data.columns.get_level_values(1))
+
+        if "Adj Close" in level0:
+            adj = data["Adj Close"]
+        elif "Adj Close" in level1:
+            adj = data.xs("Adj Close", axis=1, level=1)
+        elif "Close" in level0:
+            adj = data["Close"]
+        elif "Close" in level1:
+            adj = data.xs("Close", axis=1, level=1)
+        else:
+            # 원하는 컬럼이 없으면 포기
+            return pd.DataFrame()
+
+    # ---- 일반 컬럼인 경우 (단일 티커 등) ----
+    else:
+        cols = list(data.columns)
+        if "Adj Close" in cols:
+            adj = data["Adj Close"]
+        elif "Close" in cols:
+            adj = data["Close"]
+        else:
+            return pd.DataFrame()
+
+        # 시리즈 → 데이터프레임 통일
+        if isinstance(adj, pd.Series):
+            adj = adj.to_frame()
+
+    # 5) 컬럼 이름 정리 (단일 티커일 때도 이름을 티커로)
+    if len(tickers) == 1:
+        ticker = tickers[0]
+        if adj.ndim == 1:
+            adj = adj.to_frame(name=ticker)
+        elif adj.shape[1] == 1:
+            adj.columns = [ticker]
+
+    return adj
+
 
 
 def compute_portfolio_value(price_df: pd.DataFrame, portfolio_df: pd.DataFrame):
