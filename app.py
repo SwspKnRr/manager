@@ -188,18 +188,43 @@ def compute_portfolio_value(price_df: pd.DataFrame, portfolio_df: pd.DataFrame):
     price_df : 날짜 x 티커
     portfolio_df : ticker, shares
     """
-    # 티커 이름 정리
-    tickers = [t for t in portfolio_df["ticker"].unique() if isinstance(t, str)]
-    price_df = price_df[tickers]
+    # 1) 포트폴리오에서 티커 목록 뽑기 + 문자열 정리
+    tickers = [
+        str(t).strip()
+        for t in portfolio_df["ticker"].unique()
+        if pd.notna(t) and str(t).strip() != ""
+    ]
 
-    shares_map = portfolio_df.groupby("ticker")["shares"].sum().to_dict()
-    # 각 티커별 수량 곱해서 포트폴리오 평가액 시계열 계산
-    pv = price_df.copy()
-    for t in tickers:
-        pv[t] = pv[t] * shares_map.get(t, 0.0)
+    if len(tickers) == 0:
+        # 포트폴리오에 유효한 티커가 없음
+        return pd.Series(dtype=float), pd.DataFrame()
 
-    total = pv.sum(axis=1)
-    return total, pv
+    # 2) price_df에 실제로 존재하는 티커만 사용
+    available_cols = [c for c in price_df.columns if c in tickers]
+
+    # 하나도 없으면 그냥 빈 값 리턴
+    if len(available_cols) == 0:
+        return pd.Series(dtype=float), pd.DataFrame()
+
+    # 필요 없는 티커는 버리고, 있는 것만 사용
+    price_df = price_df[available_cols]
+
+    # 3) 종목별 수량 맵핑
+    shares_map = (
+        portfolio_df
+        .groupby("ticker")["shares"]
+        .sum()
+        .to_dict()
+    )
+
+    pv_detail = price_df.copy()
+    for t in available_cols:
+        pv_detail[t] = pv_detail[t] * float(shares_map.get(t, 0.0))
+
+    total = pv_detail.sum(axis=1)
+
+    return total, pv_detail
+
 
 
 def simple_direction_stats(portfolio_value: pd.Series):
@@ -287,6 +312,26 @@ if st.sidebar.button("💾 포트폴리오 저장"):
     save_portfolio(edited_df)
     st.session_state["portfolio_df"] = edited_df
     st.sidebar.success("저장 완료! 다음 접속 때 자동으로 불러옵니다.")
+
+    portfolio_df = st.session_state["portfolio_df"].copy()
+
+# 티커 정리
+portfolio_df["ticker"] = (
+    portfolio_df["ticker"]
+    .fillna("")
+    .astype(str)
+    .str.strip()
+)
+
+portfolio_df["shares"] = pd.to_numeric(
+    portfolio_df["shares"], errors="coerce"
+).fillna(0.0)
+
+# 유효한 티커 + 수량 > 0만 남기기
+portfolio_df = portfolio_df[
+    (portfolio_df["ticker"] != "") & (portfolio_df["shares"] > 0)
+]
+
 
 
 # ---------------------- 메인 탭 ---------------------- #
