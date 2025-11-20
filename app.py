@@ -17,9 +17,24 @@ def set_font_gulim():
 CSV_FILE = "my_portfolio.csv"
 
 def load_data():
+    # 1. 파일이 아예 없으면 -> 빈 데이터프레임 생성
     if not os.path.exists(CSV_FILE):
         return pd.DataFrame(columns=["종목코드", "종목명", "매수수량", "평균단가"])
-    return pd.read_csv(CSV_FILE)
+    
+    # 2. 파일 읽기 시도
+    try:
+        df = pd.read_csv(CSV_FILE)
+        
+        # [핵심 수정] 필수 컬럼인 '종목코드'가 있는지 확인
+        if "종목코드" not in df.columns:
+            # 예전 형식의 파일이라면 -> 깡통으로 리셋 (에러 방지)
+            return pd.DataFrame(columns=["종목코드", "종목명", "매수수량", "평균단가"])
+            
+        return df
+        
+    except Exception:
+        # 파일이 깨졌거나 읽을 수 없으면 -> 빈 것으로 리셋
+        return pd.DataFrame(columns=["종목코드", "종목명", "매수수량", "평균단가"])
 
 def save_data(code, name, amount, price):
     df = load_data()
