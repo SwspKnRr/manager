@@ -1,169 +1,268 @@
+import os
+from datetime import date, timedelta
+
 import streamlit as st
 import pandas as pd
-import os
 import yfinance as yf
+import numpy as np
 
-# --- 1. 폰트 설정 (굴림) ---
-def set_font_gulim():
-    st.markdown("""
-    <style>
-    html, body, [class*="css"] {
-        font-family: 'Gulim', '굴림', sans-serif !important;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+# ---------------------- 기본 설정 ---------------------- #
+st.set_page_config(page_title="포트폴리오 트레이딩 봇", layout="wide")
+st.title("📊 포트폴리오 트레이딩 봇 (MVP 버전)")
+st.markdown("---")
 
-# --- 2. 데이터 저장/로드 설정 ---
-CSV_FILE = "my_portfolio.csv"
+PORTFOLIO_FILE = "portfolio.json"
 
-def load_data():
-    # 1. 파일이 아예 없으면 -> 빈 데이터프레임 생성
-    if not os.path.exists(CSV_FILE):
-        return pd.DataFrame(columns=["종목코드", "종목명", "매수수량", "평균단가"])
-    
-    # 2. 파일 읽기 시도
-    try:
-        df = pd.read_csv(CSV_FILE)
-        
-        # [핵심 수정] 필수 컬럼인 '종목코드'가 있는지 확인
-        if "종목코드" not in df.columns:
-            # 예전 형식의 파일이라면 -> 깡통으로 리셋 (에러 방지)
-            return pd.DataFrame(columns=["종목코드", "종목명", "매수수량", "평균단가"])
-            
-        return df
-        
-    except Exception:
-        # 파일이 깨졌거나 읽을 수 없으면 -> 빈 것으로 리셋
-        return pd.DataFrame(columns=["종목코드", "종목명", "매수수량", "평균단가"])
 
-def save_data(code, name, amount, price):
-    df = load_data()
-    new_data = pd.DataFrame({
-        "종목코드": [code],
-        "종목명": [name],
-        "매수수량": [amount],
-        "평균단가": [price]
-    })
-    df = pd.concat([df, new_data], ignore_index=True)
-    df.to_csv(CSV_FILE, index=False)
-
-def delete_file():
-    if os.path.exists(CSV_FILE):
-        os.remove(CSV_FILE)
-
-# --- 3. 현재가 가져오기 및 수익률 계산 함수 ---
-def get_market_data(df):
-    if df.empty:
-        return df
-
-    current_prices = []
-    
-    # 진행상황 바 (로딩 중 표시)
-    progress_text = "현재가 조회 중입니다..."
-    my_bar = st.progress(0, text=progress_text)
-    
-    total_rows = len(df)
-    
-    for idx, row in df.iterrows():
-        ticker = row['종목코드']
+# ---------------------- 유틸 함수들 ---------------------- #
+def load_portfolio() -> pd.DataFrame:
+    """저장된 포트폴리오 불러오기 (없으면 빈 DF 리턴)"""
+    if os.path.exists(PORTFOLIO_FILE):
         try:
-            # yfinance로 데이터 가져오기
-            stock = yf.Ticker(ticker)
-            # 가장 최근 1일치 데이터 조회
-            hist = stock.history(period="1d")
-            
-            if not hist.empty:
-                # 종가(Close) 가져오기
-                current_price = hist['Close'].iloc[-1]
-            else:
-                current_price = row['평균단가'] # 조회 실패 시 평단가로 대체 (에러 방지)
-                
+            df = pd.read_json(PORTFOLIO_FILE, orient="records")
+            return df
         except Exception:
-            current_price = row['평균단가']
-            
-        current_prices.append(current_price)
-        # 진행률 업데이트
-        my_bar.progress((idx + 1) / total_rows, text=progress_text)
+            pass
 
-    my_bar.empty() # 로딩 바 제거
+    cols = ["ticker", "shares", "avg_price", "currency"]
+    return pd.DataFrame(columns=cols)
 
-    # 데이터프레임에 계산 결과 추가
-    df['현재가'] = current_prices
-    df['평가금액'] = df['현재가'] * df['매수수량']
-    df['투자원금'] = df['평균단가'] * df['매수수량']
-    df['평가손익'] = df['평가금액'] - df['투자원금']
-    df['수익률(%)'] = ((df['현재가'] - df['평균단가']) / df['평균단가']) * 100
-    
-    return df
 
-# --- 4. 메인 UI ---
-def main():
-    set_font_gulim()
-    st.title("📈 내 주식 포트폴리오 (수익률 Ver.)")
+def save_portfolio(df: pd.DataFrame):
+    """포트폴리오 JSON 저장"""
+    clean_df = df.copy()
+    clean_df = clean_df.dropna(subset=["ticker"])
+    clean_df["shares"] = pd.to_numeric(clean_df["shares"], errors="coerce").fillna(0.0)
+    clean_df["avg_price"] = pd.to_numeric(clean_df["avg_price"], errors="coerce").fillna(0.0)
+    clean_df["currency"] = clean_df["currency"].fillna("USD")
+    clean_df.to_json(PORTFOLIO_FILE, orient="records", force_ascii=False)
 
-    # 사이드바에 입력 폼 배치
-    with st.sidebar:
-        st.header("➕ 종목 추가")
-        with st.form("input_form"):
-            st.info("💡 한국 주식은 끝에 .KS(코스피), .KQ(코스닥)을 붙여주세요.\n예: 삼성전자(005930.KS), 에코프로(086520.KQ), 애플(AAPL)")
-            code = st.text_input("종목코드 (예: 005930.KS, AAPL)")
-            name = st.text_input("종목명 (예: 삼성전자)")
-            amount = st.number_input("수량", min_value=1, step=1)
-            price = st.number_input("평단가", min_value=0.0, step=100.0)
-            
-            if st.form_submit_button("저장하기"):
-                if code and name:
-                    save_data(code, name, amount, price)
-                    st.success(f"{name} 저장 완료!")
-                    st.rerun()
-                else:
-                    st.warning("종목코드와 종목명을 입력해주세요.")
-        
-        st.markdown("---")
-        if st.button("⚠️ 데이터 전체 초기화"):
-            delete_file()
-            st.rerun()
 
-    # 메인 화면: 포트폴리오 현황
-    st.subheader("📊 나의 자산 현황")
-    
-    raw_df = load_data()
-    
-    if not raw_df.empty:
-        # 계산 로직 실행
-        result_df = get_market_data(raw_df)
+@st.cache_data
+def fetch_price_history(tickers, start, end):
+    """yfinance로 Adj Close 받아오기"""
+    if len(tickers) == 0:
+        return pd.DataFrame()
+    data = yf.download(tickers, start=start, end=end)["Adj Close"]
+    # 단일 티커일 때는 Series가 나오므로 DF로 변환
+    if isinstance(data, pd.Series):
+        data = data.to_frame()
+    return data
 
-        # 총 자산 요약 보여주기 (Metrics)
-        total_invest = result_df['투자원금'].sum()
-        total_eval = result_df['평가금액'].sum()
-        total_profit = result_df['평가손익'].sum()
-        total_rate = (total_profit / total_invest * 100) if total_invest > 0 else 0
 
-        col1, col2, col3 = st.columns(3)
-        col1.metric("총 투자원금", f"{total_invest:,.0f}원")
-        col2.metric("총 평가금액", f"{total_eval:,.0f}원")
-        col3.metric("총 손익", f"{total_profit:,.0f}원", f"{total_rate:.2f}%")
+def compute_portfolio_value(price_df: pd.DataFrame, portfolio_df: pd.DataFrame):
+    """
+    price_df : 날짜 x 티커
+    portfolio_df : ticker, shares
+    """
+    # 티커 이름 정리
+    tickers = [t for t in portfolio_df["ticker"].unique() if isinstance(t, str)]
+    price_df = price_df[tickers]
 
-        st.markdown("---")
-        
-        # 상세 표 보여주기 (수익률에 색상 입히기)
-        # 보기 좋게 컬럼 순서 및 포맷 정리
-        display_df = result_df[['종목명', '매수수량', '평균단가', '현재가', '수익률(%)', '평가손익']]
-        
-        st.dataframe(
-            display_df.style.format({
-                '평균단가': '{:,.0f}',
-                '현재가': '{:,.0f}',
-                '수익률(%)': '{:.2f}%',
-                '평가손익': '{:,.0f}'
-            }).background_gradient(subset=['수익률(%)'], cmap='RdYlGn', vmin=-30, vmax=30),
-            use_container_width=True
+    shares_map = portfolio_df.groupby("ticker")["shares"].sum().to_dict()
+    # 각 티커별 수량 곱해서 포트폴리오 평가액 시계열 계산
+    pv = price_df.copy()
+    for t in tickers:
+        pv[t] = pv[t] * shares_map.get(t, 0.0)
+
+    total = pv.sum(axis=1)
+    return total, pv
+
+
+def simple_direction_stats(portfolio_value: pd.Series):
+    """
+    과거 포트폴리오 수익률 기반으로 '내일 수익률이 플러스일 확률' 같은 것 계산
+    (아주 단순한 통계 버전, 예시용)
+    """
+    returns = portfolio_value.pct_change().dropna()
+    if len(returns) < 10:
+        return None
+
+    # 수익률이 양수인 비율
+    prob_up = (returns > 0).mean()
+    avg_up = returns[returns > 0].mean()
+    avg_down = returns[returns <= 0].mean()
+
+    # 최근 30일 동안의 prob_up
+    recent = returns.tail(30)
+    prob_up_recent = (recent > 0).mean() if len(recent) > 0 else np.nan
+
+    return {
+        "prob_up_all": prob_up,
+        "avg_up": avg_up,
+        "avg_down": avg_down,
+        "prob_up_recent": prob_up_recent,
+    }
+
+
+def dummy_rule_search(portfolio_value: pd.Series):
+    """
+    운용 규칙 최적화 부분은 나중에 진짜 백테스트 로직 넣을 거고,
+    일단은 틀만 잡기 위해 간단한 예시 결과 리턴 (추측/샘플입니다)
+    """
+    if len(portfolio_value) < 50:
+        return []
+
+    # 예시 규칙 몇 개 가정 (실제로는 여기서 grid search 들어가야 함)
+    rules = [
+        {"name": "룰 A", "desc": "각 종목 +5% 시 20% 매도, -5% 시 20% 매수"},
+        {"name": "룰 B", "desc": "각 종목 +10% 시 30% 매도, -7% 시 20% 매수"},
+        {"name": "룰 C", "desc": "리밸런싱 없는 buy&hold"},
+    ]
+
+    # 임의로 성과 넣는 더미 (나중에 실제 백테스트로 교체)
+    results = []
+    for i, r in enumerate(rules):
+        results.append(
+            {
+                "rule_name": r["name"],
+                "description": r["desc"],
+                "cagr": 0.10 + 0.02 * i,   # 가짜 값
+                "mdd": -0.15 - 0.05 * i,   # 가짜 값
+                "final_value": 1.5 + 0.3 * i,
+            }
         )
-        
-        st.caption("* '새로고침'을 하거나 종목을 추가하면 현재가가 업데이트됩니다.")
 
+    return results
+
+
+# ---------------------- 사이드바: 포트폴리오 입력 ---------------------- #
+st.sidebar.header("포트폴리오 설정")
+
+if "portfolio_df" not in st.session_state:
+    st.session_state["portfolio_df"] = load_portfolio()
+
+st.sidebar.markdown("**보유 종목/수량/평단 입력**")
+
+edited_df = st.sidebar.data_editor(
+    st.session_state["portfolio_df"],
+    num_rows="dynamic",
+    key="portfolio_editor",
+    column_config={
+        "ticker": st.column_config.TextColumn("티커 (예: AAPL, TSLA, 005930.KS)"),
+        "shares": st.column_config.NumberColumn("보유 수량", step=1),
+        "avg_price": st.column_config.NumberColumn("평단가"),
+        "currency": st.column_config.TextColumn("통화 (USD/KRW 등)"),
+    },
+)
+
+if st.sidebar.button("💾 포트폴리오 저장"):
+    save_portfolio(edited_df)
+    st.session_state["portfolio_df"] = edited_df
+    st.sidebar.success("저장 완료! 다음 접속 때 자동으로 불러옵니다.")
+
+
+# ---------------------- 메인 탭 ---------------------- #
+tab1, tab2, tab3 = st.tabs(["📂 포트폴리오", "📈 수익 방향 예측", "⚙️ 운용 규칙 최적화"])
+
+portfolio_df = st.session_state["portfolio_df"].copy()
+portfolio_df = portfolio_df.dropna(subset=["ticker"])
+portfolio_df["shares"] = pd.to_numeric(portfolio_df["shares"], errors="coerce").fillna(0.0)
+portfolio_df = portfolio_df[portfolio_df["shares"] > 0]
+
+
+# ---------------------- 탭 1: 포트폴리오 ---------------------- #
+with tab1:
+    st.subheader("현재 포트폴리오")
+
+    if portfolio_df.empty:
+        st.warning("포트폴리오가 비어 있습니다. 왼쪽 사이드바에서 종목을 추가하세요.")
     else:
-        st.info("👈 왼쪽 사이드바에서 종목을 추가해주세요.")
+        # 가격 불러오기 (1년치 예시)
+        end = date.today()
+        start = end - timedelta(days=365)
+        tickers = portfolio_df["ticker"].tolist()
+        price_df = fetch_price_history(tickers, start, end)
 
-if __name__ == "__main__":
-    main()
+        if price_df.empty:
+            st.error("가격 데이터를 가져오지 못했습니다. 티커를 확인해 보세요.")
+        else:
+            last_prices = price_df.ffill().iloc[-1]
+            portfolio_df["last_price"] = portfolio_df["ticker"].map(last_prices.to_dict())
+            portfolio_df["value"] = portfolio_df["shares"] * portfolio_df["last_price"]
+
+            total_value = portfolio_df["value"].sum()
+            portfolio_df["weight"] = portfolio_df["value"] / total_value * 100
+
+            st.write("총 평가액 (대략):", f"{total_value:,.2f}")
+            st.dataframe(portfolio_df, use_container_width=True)
+
+            # 간단한 비중 파이차트
+            st.write("종목별 비중")
+            st.bar_chart(
+                portfolio_df.set_index("ticker")["weight"]
+            )
+
+
+# ---------------------- 탭 2: 수익 방향 예측 ---------------------- #
+with tab2:
+    st.subheader("포트폴리오 수익 방향 (통계 기반)")
+
+    if portfolio_df.empty:
+        st.warning("포트폴리오가 비어 있어 수익 방향을 계산할 수 없습니다.")
+    else:
+        horizon_years = st.slider("과거 몇 년을 사용할지", 1, 10, 3)
+        end = date.today()
+        start = end - timedelta(days=365 * horizon_years)
+        tickers = portfolio_df["ticker"].tolist()
+
+        price_df = fetch_price_history(tickers, start, end)
+        if price_df.empty:
+            st.error("가격 데이터를 가져오지 못했습니다.")
+        else:
+            total_pv, pv_detail = compute_portfolio_value(price_df, portfolio_df)
+            st.line_chart(total_pv, height=300)
+
+            stats = simple_direction_stats(total_pv)
+            if stats is None:
+                st.warning("데이터가 너무 적어서 통계를 계산할 수 없습니다.")
+            else:
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric(
+                        "전체 기간 기준, 다음 날 수익률이 플러스일 확률 (추정)",
+                        f"{stats['prob_up_all']*100:,.1f}%",
+                    )
+                    st.write(
+                        f"- 플러스일 때 평균 수익률: {stats['avg_up']*100:,.2f}%\n"
+                        f"- 마이너스일 때 평균 수익률: {stats['avg_down']*100:,.2f}%"
+                    )
+                with col2:
+                    st.metric(
+                        "최근 30일 기준, 다음 날 플러스일 확률 (추정)",
+                        f"{stats['prob_up_recent']*100:,.1f}%",
+                    )
+                st.info(
+                    "※ 완전한 예측 모델이 아니라, 과거 분포 기반으로 '분위기'를 보는 수준의 통계입니다."
+                )
+
+
+# ---------------------- 탭 3: 운용 규칙 최적화 ---------------------- #
+with tab3:
+    st.subheader("간단 운용 규칙 탐색 (데모)")
+
+    if portfolio_df.empty:
+        st.warning("포트폴리오가 비어 있어 규칙 테스트를 할 수 없습니다.")
+    else:
+        horizon_years = st.slider("백테스트 기간 (년)", 1, 10, 5, key="rule_years")
+        end = date.today()
+        start = end - timedelta(days=365 * horizon_years)
+        tickers = portfolio_df["ticker"].tolist()
+
+        price_df = fetch_price_history(tickers, start, end)
+        if price_df.empty:
+            st.error("가격 데이터를 가져오지 못했습니다.")
+        else:
+            total_pv, _ = compute_portfolio_value(price_df, portfolio_df)
+
+            if st.button("🚀 규칙 탐색 실행 (데모)"):
+                results = dummy_rule_search(total_pv)
+                if not results:
+                    st.warning("데이터가 부족하거나 규칙 탐색 결과가 없습니다.")
+                else:
+                    res_df = pd.DataFrame(results)
+                    st.dataframe(res_df, use_container_width=True)
+                    st.info(
+                        "※ 현재는 '형식만 갖춘 데모 결과'입니다. "
+                        "진짜 규칙 최적화 로직은 너랑 상의해서 백테스트 넣자."
+                    )
