@@ -6,6 +6,79 @@ import pandas as pd
 import yfinance as yf
 import numpy as np
 
+from typing import Tuple
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+
+def make_features_from_pv(total_pv: pd.Series) -> Tuple[pd.DataFrame, pd.Series]:
+    """포트폴리오 평가액 시계열 → 피처 X, 라벨 y 생성"""
+
+    total_pv = total_pv.dropna()
+    returns = total_pv.pct_change().dropna()
+
+    df = pd.DataFrame(index=returns.index)
+    df["r_1"] = returns.shift(1)
+    df["r_3"] = returns.rolling(3).mean().shift(1)
+    df["r_5"] = returns.rolling(5).mean().shift(1)
+    df["r_10"] = returns.rolling(10).mean().shift(1)
+
+    df["vol_5"] = returns.rolling(5).std().shift(1)
+    df["vol_20"] = returns.rolling(20).std().shift(1)
+
+    ma_5 = total_pv.rolling(5).mean()
+    ma_20 = total_pv.rolling(20).mean()
+    df["ma_gap"] = (ma_5 - ma_20) / ma_20
+
+    dd = (total_pv / total_pv.cummax() - 1)
+    df["drawdown"] = dd
+
+    # 라벨: 내일이 플러스인지?
+    y = (returns.shift(-1) > 0).astype(int)
+
+    # 피처/라벨에서 NaN 제거
+    data = df.join(y.rename("y")).dropna()
+    X = data.drop(columns=["y"])
+    y = data["y"]
+
+    return X, y
+
+def train_direction_model(X: pd.DataFrame, y: pd.Series):
+    """
+    RandomForest로 방향 예측 모델 학습.
+    (여기선 hyperparameter 튜닝 없이 기본값 사용)
+    """
+    if len(X) < 200:
+        return None, None, None  # 데이터 너무 적음
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, shuffle=False  # 시계열이라 시간 순서 유지
+    )
+
+    model = RandomForestClassifier(
+        n_estimators=300,
+        max_depth=5,
+        random_state=42,
+        n_jobs=-1,
+    )
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_test)
+    acc = accuracy_score(y_test, y_pred)
+
+    return model, acc, (X_test.index[0], X_test.index[-1])
+
+
+def predict_next_prob(model, X: pd.DataFrame):
+    """
+    가장 최근 row 하나를 넣어서 '내일 상승 확률' 계산.
+    """
+    if model is None or X.empty:
+        return None
+    last_x = X.iloc[[-1]]  # 마지막 행 1개
+    prob = model.predict_proba(last_x)[0][1]  # 클래스 1(상승)의 확률
+    return prob
+
+
 # ---------------------- 기본 설정 ---------------------- #
 st.set_page_config(page_title="포트폴리오 트레이딩 봇", layout="wide")
 st.title("📊 포트폴리오 트레이딩 봇 (MVP 버전)")
@@ -194,14 +267,13 @@ with tab1:
             )
 
 
-# ---------------------- 탭 2: 수익 방향 예측 ---------------------- #
 with tab2:
-    st.subheader("포트폴리오 수익 방향 (통계 기반)")
+    st.subheader("포트폴리오 수익 방향 (ML + 통계)")
 
     if portfolio_df.empty:
         st.warning("포트폴리오가 비어 있어 수익 방향을 계산할 수 없습니다.")
     else:
-        horizon_years = st.slider("과거 몇 년을 사용할지", 1, 10, 3)
+        horizon_years = st.slider("과거 몇 년 데이터로 학습할지", 1, 10, 3)
         end = date.today()
         start = end - timedelta(days=365 * horizon_years)
         tickers = portfolio_df["ticker"].tolist()
@@ -213,28 +285,49 @@ with tab2:
             total_pv, pv_detail = compute_portfolio_value(price_df, portfolio_df)
             st.line_chart(total_pv, height=300)
 
+            # 1) 통계 기반 지표 (기존 함수)
             stats = simple_direction_stats(total_pv)
-            if stats is None:
-                st.warning("데이터가 너무 적어서 통계를 계산할 수 없습니다.")
-            else:
+            if stats is not None:
+                st.markdown("### 통계 기반 분위기")
                 col1, col2 = st.columns(2)
                 with col1:
                     st.metric(
-                        "전체 기간 기준, 다음 날 수익률이 플러스일 확률 (추정)",
+                        "전체 기간 기준, 다음 날 플러스일 확률 (추정)",
                         f"{stats['prob_up_all']*100:,.1f}%",
-                    )
-                    st.write(
-                        f"- 플러스일 때 평균 수익률: {stats['avg_up']*100:,.2f}%\n"
-                        f"- 마이너스일 때 평균 수익률: {stats['avg_down']*100:,.2f}%"
                     )
                 with col2:
                     st.metric(
                         "최근 30일 기준, 다음 날 플러스일 확률 (추정)",
                         f"{stats['prob_up_recent']*100:,.1f}%",
                     )
-                st.info(
-                    "※ 완전한 예측 모델이 아니라, 과거 분포 기반으로 '분위기'를 보는 수준의 통계입니다."
-                )
+
+            # 2) RandomForest 기반 방향 예측
+            st.markdown("---")
+            st.markdown("### ML(RandomForest) 기반 방향 예측")
+
+            X, y = make_features_from_pv(total_pv)
+            st.write(f"학습 가능한 데이터 포인트 수: {len(X)}")
+
+            if len(X) < 200:
+                st.info("데이터가 200일 미만이라 간단 통계만 사용합니다.")
+            else:
+                if st.button("🤖 모델 학습 및 평가"):
+                    model, acc, (test_start, test_end) = train_direction_model(X, y)
+                    if model is None:
+                        st.error("모델 학습에 실패했습니다.")
+                    else:
+                        st.success(
+                            f"테스트 구간({test_start.date()} ~ {test_end.date()}) "
+                            f"정확도: {acc*100:,.1f}%"
+                        )
+                        prob_next = predict_next_prob(model, X)
+                        if prob_next is not None:
+                            st.metric(
+                                "현재 기준 내일 상승할 확률 (모델 추정)",
+                                f"{prob_next*100:,.1f}%",
+                            )
+                        st.caption("※ 단순 RandomForest 분류 모델이며, 과최적화/과거 데이터 편향 위험이 있습니다.")
+
 
 
 # ---------------------- 탭 3: 운용 규칙 최적화 ---------------------- #
