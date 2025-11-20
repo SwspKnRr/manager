@@ -273,7 +273,11 @@ edited_df = st.sidebar.data_editor(
     key="portfolio_editor",
     column_config={
         "ticker": st.column_config.TextColumn("티커 (예: AAPL, TSLA, 005930.KS)"),
-        "shares": st.column_config.NumberColumn("보유 수량", step=1),
+        "shares": st.column_config.NumberColumn(
+             "보유 수량",
+             step=0.0001,        # 원하는 단위
+            format="%.4f",      # 표시 형식 (소수 4자리까지)
+        ),
         "avg_price": st.column_config.NumberColumn("평단가"),
         "currency": st.column_config.TextColumn("통화 (USD/KRW 등)"),
     },
