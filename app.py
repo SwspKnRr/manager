@@ -14,8 +14,12 @@ st.set_page_config(page_title="My Quant Portfolio", layout="wide")
 if 'search_ticker' not in st.session_state:
     st.session_state['search_ticker'] = 'TQQQ'
 
+# [수정] DB 연결 시 timeout 추가 (락 걸림 방지)
+def get_db_connection():
+    return sqlite3.connect('portfolio.db', timeout=30)
+
 def init_db():
-    conn = sqlite3.connect('portfolio.db')
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS holdings
                  (ticker TEXT PRIMARY KEY, shares INTEGER, avg_price REAL, sort_order INTEGER)''')
@@ -32,7 +36,7 @@ def init_db():
     conn.close()
 
 def get_portfolio():
-    conn = sqlite3.connect('portfolio.db')
+    conn = get_db_connection()
     try:
         df_holdings = pd.read_sql("SELECT * FROM holdings ORDER BY sort_order ASC, ticker ASC", conn)
         df_cash = pd.read_sql("SELECT * FROM cash", conn)
@@ -41,23 +45,37 @@ def get_portfolio():
     conn.close()
     return df_holdings, df_cash
 
+# [수정] 로그 기록 시 테이블 없으면 자동 생성 (에러 방지)
 def add_log(ticker, action, shares, price, note=""):
-    conn = sqlite3.connect('portfolio.db')
+    conn = get_db_connection()
     c = conn.cursor()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    c.execute("INSERT INTO trade_logs (date, ticker, action, shares, price, note) VALUES (?, ?, ?, ?, ?, ?)", 
-              (now, ticker, action, shares, price, note))
+    
+    try:
+        c.execute("INSERT INTO trade_logs (date, ticker, action, shares, price, note) VALUES (?, ?, ?, ?, ?, ?)", 
+                  (now, ticker, action, shares, price, note))
+    except sqlite3.OperationalError:
+        # 테이블이 없어서 에러가 난 경우, 테이블 생성 후 재시도
+        c.execute('''CREATE TABLE IF NOT EXISTS trade_logs
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      date TEXT, ticker TEXT, action TEXT, shares INTEGER, price REAL, note TEXT)''')
+        c.execute("INSERT INTO trade_logs (date, ticker, action, shares, price, note) VALUES (?, ?, ?, ?, ?, ?)", 
+                  (now, ticker, action, shares, price, note))
+        
     conn.commit()
     conn.close()
 
 def get_logs():
-    conn = sqlite3.connect('portfolio.db')
-    df = pd.read_sql("SELECT * FROM trade_logs ORDER BY id DESC", conn)
+    conn = get_db_connection()
+    try:
+        df = pd.read_sql("SELECT * FROM trade_logs ORDER BY id DESC", conn)
+    except:
+        df = pd.DataFrame(columns=['id', 'date', 'ticker', 'action', 'shares', 'price', 'note'])
     conn.close()
     return df
 
 def delete_log(log_id):
-    conn = sqlite3.connect('portfolio.db')
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute("DELETE FROM trade_logs WHERE id=?", (log_id,))
     conn.commit()
@@ -65,7 +83,7 @@ def delete_log(log_id):
     st.toast(f"✅ 로그 삭제 완료 (ID: {log_id})")
 
 def update_cash(amount):
-    conn = sqlite3.connect('portfolio.db')
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute("INSERT OR REPLACE INTO cash VALUES (?, ?)", ('USD', amount))
     conn.commit()
@@ -73,7 +91,7 @@ def update_cash(amount):
 
 # [매수 Logic]
 def add_stock(ticker, new_shares, new_price):
-    conn = sqlite3.connect('portfolio.db')
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute("SELECT shares, avg_price FROM holdings WHERE ticker=?", (ticker,))
     row = c.fetchone()
@@ -84,21 +102,27 @@ def add_stock(ticker, new_shares, new_price):
         total_cost = (old_shares * old_avg) + (new_shares * new_price)
         new_avg = total_cost / total_shares if total_shares > 0 else 0.0
         c.execute("UPDATE holdings SET shares=?, avg_price=? WHERE ticker=?", (total_shares, new_avg, ticker))
+        # 먼저 커밋하여 락 해제 후 로그 기록
+        conn.commit()
+        conn.close()
+        
         add_log(ticker, "추가 매수", new_shares, new_price, f"평단: ${old_avg:.2f}->${new_avg:.2f}")
         st.toast(f"➕ 매수 완료: {ticker}")
     else:
         c.execute("SELECT MAX(sort_order) FROM holdings")
-        max_order = c.fetchone()[0]
-        next_order = (max_order + 1) if max_order else 1
+        res = c.fetchone()
+        max_order = res[0] if res and res[0] else 0
+        next_order = max_order + 1
         c.execute("INSERT INTO holdings VALUES (?, ?, ?, ?)", (ticker, new_shares, new_price, next_order))
+        conn.commit()
+        conn.close()
+        
         add_log(ticker, "신규 매수", new_shares, new_price, "신규 편입")
         st.toast(f"🆕 신규 매수: {ticker}")
-    conn.commit()
-    conn.close()
 
-# [신규] 매도 Logic
+# [매도 Logic]
 def sell_stock(ticker, sell_shares, sell_price):
-    conn = sqlite3.connect('portfolio.db')
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute("SELECT shares, avg_price FROM holdings WHERE ticker=?", (ticker,))
     row = c.fetchone()
@@ -111,27 +135,26 @@ def sell_stock(ticker, sell_shares, sell_price):
             return
 
         new_shares = old_shares - sell_shares
-        
-        # 실현 손익 계산 (단순 참고용)
         realized_pnl = (sell_price - old_avg) * sell_shares
         
         if new_shares == 0:
             c.execute("DELETE FROM holdings WHERE ticker=?", (ticker,))
+            conn.commit()
+            conn.close()
             add_log(ticker, "전량 매도", sell_shares, sell_price, f"실현손익: ${realized_pnl:.2f}")
             st.toast(f"📉 전량 매도 완료: {ticker}")
         else:
-            # 매도 시 평단가는 변하지 않음 (이동평균법/FIFO 일반적 룰)
             c.execute("UPDATE holdings SET shares=? WHERE ticker=?", (new_shares, ticker))
+            conn.commit()
+            conn.close()
             add_log(ticker, "부분 매도", sell_shares, sell_price, f"잔고: {new_shares}주")
             st.toast(f"📉 부분 매도 완료: {ticker}")
-            
-        conn.commit()
     else:
+        conn.close()
         st.error(f"❌ 매도 불가: 보유하지 않은 종목입니다 ({ticker})")
-    conn.close()
 
 def overwrite_stock(ticker, shares, price):
-    conn = sqlite3.connect('portfolio.db')
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute("SELECT sort_order FROM holdings WHERE ticker=?", (ticker,))
     row = c.fetchone()
@@ -143,7 +166,7 @@ def overwrite_stock(ticker, shares, price):
     st.toast(f"✏️ 수정 완료: {ticker}")
 
 def delete_stock(ticker):
-    conn = sqlite3.connect('portfolio.db')
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute("DELETE FROM holdings WHERE ticker=?", (ticker,))
     conn.commit()
@@ -152,7 +175,7 @@ def delete_stock(ticker):
     st.toast(f"🗑️ 삭제 완료: {ticker}")
 
 def update_sort_orders(df_edited):
-    conn = sqlite3.connect('portfolio.db')
+    conn = get_db_connection()
     c = conn.cursor()
     existing_tickers = df_edited['ticker'].tolist()
     if existing_tickers:
@@ -318,14 +341,12 @@ with col_side:
         st.caption("티커 입력 후 매수/매도 선택")
         input_ticker = st.text_input("티커 (예: TQQQ)").upper()
         
-        # 매매 공통 입력창
         c_sh, c_pr = st.columns(2)
         input_shares = c_sh.number_input("수량", min_value=1, step=1)
         input_avg = c_pr.number_input("단가 ($)", min_value=0.0)
         
         is_overwrite = st.checkbox("단순 정보 수정 (덮어쓰기)")
         
-        # 버튼 2개 (매수 / 매도)
         col_buy, col_sell = st.columns(2)
         
         if col_buy.button("🔵 매수 (Buy)", use_container_width=True):
