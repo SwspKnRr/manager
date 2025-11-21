@@ -8,185 +8,214 @@ from prophet import Prophet
 import warnings
 warnings.filterwarnings("ignore")
 
-# ---------------------------------- 캐시 ----------------------------------
-@st.cache_data(ttl=300, show_spinner=False)
-def get_prices(tickers):
-    data = yf.download(tickers, period="5y", progress=False, auto_adjust=True)['Close']
-    if isinstance(data, pd.Series):
-        data = data.to_frame(tickers[0])
-    return data
+st.set_page_config(page_title="실전 포트폴리오", layout="wide")
+st.markdown("<style>.big-font{font-size:52px !important;font-weight:bold;}.pos{color:#e62e2e;font-size:28px;font-weight:bold}.neg{color:#0066ff;font-size:28px;font-weight:bold}</style>", unsafe_allow_html=True)
 
-# ---------------------------------- 설정 ----------------------------------
-st.set_page_config(page_title="실전 포트폴리오", layout="wide", initial_sidebar_state="expanded")
-st.markdown("<style>.big-font{font-size:52px !important;font-weight:bold;color:#111}.profit-positive{color:#e62e2e;font-size:28px;font-weight:bold}.profit-negative{color:#0066ff;font-size:28px;font-weight:bold}</style>", unsafe_allow_html=True)
+# 포트폴리오 영구 저장
+if "data" not in st.session_state:
+    try:
+        with open("p.json") as f:
+            saved = json.load(f)
+            st.session_state.data = pd.DataFrame(saved["h"])
+            st.session_state.cash = float(saved["c"])
+    except:
+        st.session_state.data = pd.DataFrame(columns=["ticker","shares","avg_price"])
+        st.session_state.cash = 10000.0
 
-# ---------------------------------- 포트폴리오 저장 ----------------------------------
-FILE = "portfolio.json"
-def load(): 
-    try: 
-        with open(FILE) as f: return pd.DataFrame(json.load(f)["h"]), float(json.load(f)["c"])
-    except: return pd.DataFrame(columns=["ticker","shares","avg_price"]), 10000.0
-def save(): 
-    with open(FILE,"w") as f: json.dump({"h":st.session_state.p.to_dict("records"),"c":float(st.session_state.c)}, f)
+df = st.session_state.data
 
-if "p" not in st.session_state:
-    st.session_state.p, st.session_state.c = load()
+# ------------------------------- 사이드바 -------------------------------
+st.sidebar.header("💼 포트폴리오 입력 (USD 기준)")
 
-# ---------------------------------- 사이드바 ----------------------------------
-with st.sidebar.form("add"):
-    t = st.text_input("티커", placeholder="QQQ").upper().strip()
-    s = st.number_input("주수", 0, step=1, value=0)
-    a = st.number_input("평균단가 USD", 0.0, format="%.2f")
-    if st.form_submit_button("추가/수정") and t:
-        if t in st.session_state.p["ticker"].values:
-            st.session_state.p.loc[st.session_state.p.ticker==t, ["shares","avg_price"]] = [s,a]
+# 포트폴리오 DataFrame (항상 세션에 존재)
+if "portfolio" not in st.session_state:
+    try:
+        with open("portfolio.json", "r") as f:
+            data = json.load(f)
+            st.session_state.portfolio = pd.DataFrame(data["holdings"])
+            st.session_state.cash_usd = float(data["cash"])
+    except:
+        st.session_state.portfolio = pd.DataFrame(columns=["ticker", "shares", "avg_price"])
+        st.session_state.cash_usd = 10000.0
+
+df = st.session_state.portfolio
+
+# 종목 추가/수정 폼
+with st.sidebar.form(key="add_stock_form"):
+    ticker = st.text_input("티커", placeholder="QQQ, TQQQ 등").upper().strip()
+    shares = st.number_input("보유 주수", min_value=0, step=1, value=0)
+    avg_price = st.number_input("평균 단가 (USD)", min_value=0.0, format="%.2f", value=0.0)
+    
+    if st.form_submit_button("✅ 추가/수정") and ticker:
+        if ticker = ticker.upper().strip()
+        if ticker in df["ticker"].values:
+            df.loc[df.ticker == ticker, ["shares", "avg_price"]] = [shares, avg_price]
+            st.success(f"{ticker} 수정 완료")
         else:
-            st.session_state.p = pd.concat([st.session_state.p, pd.DataFrame([{"ticker":t,"shares":s,"avg_price":a}])], ignore_index=True)
-        save()
+            new_row = pd.DataFrame([{"ticker": ticker, "shares": shares, "avg_price": avg_price}])
+            df = pd.concat([df, new_row], ignore_index=True)
+            st.success(f"{ticker} 추가 완료")
+        
+        # 저장
+        st.session_state.portfolio = df
+        with open("portfolio.json", "w") as f:
+            json.dump({
+                "holdings": df.to_dict("records"),
+                "cash": float(st.session_state.cash_usd)
+            }, f)
         st.rerun()
-st.sidebar.number_input("현금 USD", min_value=0.0, value=float(st.session_state.c), key="c", on_change=save)
 
-if st.session_state.p.empty:
-    st.warning("종목 추가하세요")
+# 현금 잔고 입력 (실시간 저장)
+st.sidebar.markdown("---")
+current_cash = st.sidebar.number_input(
+    "💰 현금 잔고 (USD)",
+    min_value=0.0,
+    value=float(st.session_state.cash_usd),
+    step=500.0,
+    format="%.2f"
+)
+
+# 현금 바뀌면 바로 저장
+if abs(current_cash - st.session_state.cash_usd) > 0.01:
+    st.session_state.cash_usd = current_cash
+    with open("portfolio.json", "w") as f:
+        json.dump({
+            "holdings": st.session_state.portfolio.to_dict("records"),
+            "cash": float(st.session_state.cash_usd)
+        }, f)
+    st.rerun()  # UI 즉시 반영
+
+# 포트폴리오 초기화 버튼 (선택사항)
+if st.sidebar.button("🗑️ 포트폴리오 초기화"):
+    st.session_state.portfolio = pd.DataFrame(columns=["ticker", "shares", "avg_price"])
+    st.session_state.cash_usd = 0.0
+    with open("portfolio.json", "w") as f:
+        json.dump({"holdings": [], "cash": 0.0}, f)
+    st.success("초기화 완료")
+    st.rerun()
+
+if df.empty:
+    st.warning("종목 추가해라 임마")
     st.stop()
 
-tickers = st.session_state.p["ticker"].tolist()
+tickers = df["ticker"].tolist()
 
-# ---------------------------------- 데이터 ----------------------------------
-prices = get_prices(tickers)
-if prices.empty:
-    st.error("티커 확인")
-    st.stop()
+# 데이터
+@st.cache_data(ttl=180)
+def load_data(t):
+    return yf.download(t, period="5y", progress=False, auto_adjust=True)["Close"]
+
+prices = load_data(tickers)
 current = prices.iloc[-1]
 
-# ---------------------------------- 계산 ----------------------------------
-p = st.session_state.p.copy()
-p["price"] = p["ticker"].map(current)
-p = p.dropna(subset=["price"])
-p["value"] = p["shares"] * p["price"]
-p["cost"]  = p["shares"] * p["avg_price"]
-p["profit"] = p["value"] - p["cost"]
-p["pct"] = p["profit"]/p["cost"]*100
+# 계산
+port = df.copy()
+port["price"] = current.reindex(port["ticker"]).values
+port["value"] = port["shares"] * port["price"]
+port["profit"] = port["value"] - port["shares"]*port["avg_price"]
+port["pct"] = port["profit"] / (port["shares"]*port["avg_price"]) * 100
 
-total_value = p["value"].sum() + st.session_state.c
-total_return = (total_value / (p["cost"].sum() + st.session_state.c) - 1) * 100
+total_value = port["value"].sum() + st.session_state.cash
+total_ret = (total_value / (port["shares"]*port["avg_price"]).sum() + st.session_state.cash - st.session_state.cash) * 100
 
-# ---------------------------------- 헤더 ----------------------------------
-col1,_ = st.columns([1,3])
-with col1:
+# 헤더
+c1,_ = st.columns([1,3])
+with c1:
     st.markdown(f'<p class="big-font">${total_value:,.0f}</p>', unsafe_allow_html=True)
-    st.markdown(f'<p class={"profit-positive" if total_return>=0 else "profit-negative"}>{total_return:+.2f}%</p>', unsafe_allow_html=True)
+    st.markdown(f'<p class="{"pos" if total_ret>=0 else "neg"}">{total_ret:+.2f}%</p>', unsafe_allow_html=True)
 
-# ---------------------------------- 그래프 ----------------------------------
-hist = prices.mul(p.set_index("ticker")["shares"], axis=1).sum(axis=1) + st.session_state.c
-hist = hist.ffill()
+# 그래프
+hist = prices.mul(port.set_index("ticker")["shares"], axis=1).sum(axis=1) + st.session_state.cash
 fig = go.Figure(go.Scatter(x=hist.index, y=hist, line=dict(color="#e62e2e", width=3)))
-fig.update_layout(height=320, margin=dict(l=0,r=0,t=20,b=0), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", xaxis=dict(showgrid=False), yaxis=dict(showgrid=False, showticklabels=False))
+fig.update_layout(height=320, margin=dict(t=20,b=0,l=0,r=0), showlegend=False, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", xaxis_visible=False, yaxis_visible=False)
 st.plotly_chart(fig, use_container_width=True, config={"displayModeBar":False})
 
-# ---------------------------------- 테이블 ----------------------------------
-disp = p[["ticker","shares","avg_price","price","value","pct"]].copy()
+# 테이블
+disp = port[["ticker","shares","avg_price","price","value","pct"]].round(2)
 disp.columns = ["티커","주수","평균단가","현재가","평가액","수익률%"]
 disp["주수"] = disp["주수"].astype(int).astype(str)+"주"
-st.dataframe(disp.round(2).style.format({"평균단가":"${:.2f}","현재가":"${:.2f}","평가액":"${:,.0f}","수익률%":"{:+.2f}%"}), use_container_width=True, hide_index=True)
+st.dataframe(disp.style.format({"평균단가":"${:.2f}","현재가":"${:.2f}","평가액":"${:,.0f}","수익률%":"{:+.2f}%"}), use_container_width=True, hide_index=True)
 
-# ---------------------------------- 탭 ----------------------------------
-tab1, tab2, tab3 = st.tabs(["리밸런싱 가이드", "오늘 매수/매도", "가격 예측"])
+# 탭
+tab1, tab2, tab3 = st.tabs(["리밸런싱", "오늘 신호", "가격 예측"])
 
-# -------------------------- 리밸런싱 --------------------------
 with tab1:
-    target = st.selectbox("대상", tickers, key="rebal")
-    if st.button("최적 파라미터 찾기"):
+    target = st.selectbox("종목", tickers)
+    if st.button("최적 전략 찾기"):
         with st.spinner("백테스팅 중..."):
-            df = yf.download(target, period="5y", progress=False)["Close"]
-            ret = df.pct_change().fillna(0)
-            best, param = -999, None
-            for up in np.arange(0.08,0.36,0.04):
-                for down in np.arange(-0.30,-0.06,0.04):
-                    for r in [0.5,0.75,1.0]:
+            close = yf.download(target, period="5y", progress=False)["Close"]
+            ret = close.pct_change().fillna(0)
+            best = -1
+            for up in np.arange(0.1, 0.4, 0.05):
+                for down in np.arange(-0.3, -0.08, 0.05):
+                    for ratio in [0.5, 0.8, 1.0]:
                         cash = 2000.0
-                        shares = 10000/df.iloc[0]
-                        for i in range(1,len(df)):
-                            price = df.iloc[i]
+                        shares = 10000 / close.iloc[0]
+                        for i in range(1, len(close)):
                             if ret.iloc[i] >= up:
-                                sell = shares * r
-                                cash += sell * price
+                                sell = shares * ratio
+                                cash += sell * close.iloc[i]
                                 shares -= sell
-                            elif ret.iloc[i] <= down and cash > 100:
-                                buy = cash*0.8 / price
+                            elif ret.iloc[i] <= down and cash > 500:
+                                buy = cash * 0.8 / close.iloc[i]
                                 shares += buy
-                                cash -= buy*price
-                        final = shares*df.iloc[-1] + cash
+                                cash -= buy * close.iloc[i]
+                        final = shares * close.iloc[-1] + cash
                         cagr = (final/12000)**(1/5)-1
                         if cagr > best:
-                            best, param = cagr, (up,down,r,final)
-            u,d,r,f = param
-            st.success(f"+{u:.1%} 상승 → {r:.0%} 매도\n{d:.1%} 하락 → 현금 80% 매수\n5년 결과 ${f:,.0f} (CAGR {best:.1%})")
+                            best = cagr
+                            best_p = (up, down, ratio, final)
+            u,d,r,f = best_p
+            st.success(f"**최적**\n+{u:.1%} ↑ → {r:.0%} 매도\n{d:.1%} ↓ → 현금 80% 매수\n→ 5년 {f:,.0f}달러 (CAGR {best:.1%})")
 
-# -------------------------- 오늘 매수/매도 --------------------------
 with tab2:
-    st.write("#### 오늘 매수/매도 강도")
     scores = {}
     for t in tickers:
         try:
-            df = yf.download(t, period="400d", progress=False, auto_adjust=True)
-            if len(df)<50:
-                scores[t] = 50
-                continue
-            c = df["Close"]
+            d = yf.download(t, period="1y", progress=False)
+            c = d["Close"]
             delta = c.diff()
-            up = delta.clip(lower=0).rolling(14).mean()
-            down = -delta.clip(upper=0).rolling(14).mean()
-            rs = np.where(down==0, 100, up/(down+1e-10))
-            rsi = 100 - 100/(1+rs)
-            rsi_val = float(rsi[-1]) if np.isscalar(rsi[-1]) else float(rsi.iloc[-1])
-
-            macd = c.ewm(span=12,adjust=False).mean() - c.ewm(span=26,adjust=False).mean()
-            signal = macd.ewm(span=9,adjust=False).mean()
-            bb_lower = c.rolling(20).mean().iloc[-1] - 2*c.rolling(20).std().iloc[-1]
+            gain = delta.clip(lower=0).rolling(14).mean()
+            loss = -delta.clip(upper=0).rolling(14).mean()
+            rsi = 100 - 100/(1 + gain/loss.replace(0, 1e-10))
+            rsi_val = rsi.iloc[-1]
 
             score = 50
             if rsi_val < 30: score += 35
-            if rsi_val > 70: score -= 30
-            if c.iloc[-1] < bb_lower: score += 25
-            if len(macd)>1 and macd.iloc[-1]>signal.iloc[-1] and macd.iloc[-2]<=signal.iloc[-2]: score += 20
-            if c.iloc[-1] > c.rolling(50).mean().iloc[-1]: score += 10
+            if rsi_val > 70: score -= 35
+            if c.iloc[-1] < c.rolling(20).mean().iloc[-1] - 2*c.rolling(20).std().iloc[-1]: score += 25
+            macd = c.ewm(12).mean() - c.ewm(26).mean()
+            if macd.iloc[-1] > macd.ewm(9).mean().iloc[-1] and macd.iloc[-2] <= macd.ewm(9).mean().iloc[-2]: score += 20
             scores[t] = min(100, max(0, int(score)))
         except:
             scores[t] = 50
+    sdf = pd.DataFrame(list(scores.items()), columns=["티커","점수"]).sort_values("점수", ascending=False)
+    sdf["신호"] = pd.cut(sdf["점수"], bins=[0,40,65,85,100], labels=["🔴 매도","⚪ 관망","🟢 매수","🟢🟢 강력매수"])
+    st.dataframe(sdf, use_container_width=True, hide_index=True)
 
-    df_score = pd.DataFrame(list(scores.items()), columns=["티커","점수"]).sort_values("점수",ascending=False)
-    df_score["추천"] = df_score["점수"].apply(lambda x: "강력매수🟢🟢" if x>=85 else "매수🟢" if x>=70 else "매도🔴" if x<=40 else "관망")
-    st.dataframe(df_score, use_container_width=True, hide_index=True)
-
-# -------------------------- 가격 예측 --------------------------
 with tab3:
-    ticker = st.selectbox("예측 종목", tickers, key="pred")
-    if st.button("예측 실행"):
-        with st.spinner("예측 중..."):
-            raw = yf.download(ticker, period="5y", progress=False, auto_adjust=True)
-            df = pd.DataFrame({"ds": raw.index, "y": raw["Close"].values})
+    ticker = st.selectbox("예측 종목", tickers)
+    if st.button("예측 시작"):
+        with st.spinner("학습 중..."):
+            raw = yf.download(ticker, period="5y", progress=False)
+            train = pd.DataFrame({"ds": raw.index, "y": raw["Close"].values})
             m = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False)
-            m.fit(df)
+            m.fit(train)
             future = m.make_future_dataframe(30)
-            fc = m.predict(future)
-
+            forecast = m.predict(future)
             fig = go.Figure()
-            fig.add_trace(go.Scatter(x=df["ds"], y=df["y"], name="실제", line=dict(color="#1f77b4")))
-            fig.add_trace(go.Scatter(x=fc["ds"], y=fc["yhat"], name="예측", line=dict(color="#e62e2e", width=3)))
-            fig.add_trace(go.Scatter(x=fc["ds"], y=fc["yhat_upper"], line=dict(width=0), showlegend=False))
-            fig.add_trace(go.Scatter(x=fc["ds"], y=fc["yhat_lower"], line=dict(width=0), fill="tonexty", fillcolor="rgba(100,150,255,0.2)", name="80% 구간"))
-            fig.update_layout(height=500, title=f"{ticker} 가격 예측")
+            fig.add_trace(go.Scatter(x=train["ds"], y=train["y"], name="실제"))
+            fig.add_trace(go.Scatter(x=forecast["ds"], y=forecast["yhat"], name="예측", line=dict(color="#e62e2e")))
+            fig.add_trace(go.Scatter(x=forecast["ds"], y=forecast["yhat_upper"], line=dict(width=0), showlegend=False))
+            fig.add_trace(go.Scatter(x=forecast["ds"], y=forecast["yhat_lower"], line=dict(width=0), fill="tonexty", fillcolor="rgba(100,150,255,0.2)", name="구간"))
             st.plotly_chart(fig, use_container_width=True)
-
             curr = raw["Close"].iloc[-1]
-            tmr = fc[fc["ds"] > df["ds"].iloc[-1]].iloc[0]["yhat"]
-            w7  = fc.iloc[-24]["yhat"]
-            m30 = fc.iloc[-1]["yhat"]
-            c1,c2,c3,c4 = st.columns(4)
-            c1.metric("현재", f"${curr:.2f}")
-            c2.metric("내일", f"${tmr:.2f}", f"{(tmr/curr-1)*100:+.2f}%")
-            c3.metric("+7일", f"${w7:.2f}", f"{(w7/curr-1)*100:+.2f}%")
-            c4.metric("+30일", f"${m30:.2f}", f"{(m30/curr-1)*100:+.2f}%")
+            tmr = forecast[forecast["ds"] > train["ds"].iloc[-1]].iloc[0]["yhat"]
+            w7 = forecast.iloc[-24]["yhat"]
+            m30 = forecast.iloc[-1]["yhat"]
+            st.metric("현재", f"${curr:.2f}")
+            st.metric("내일 예상", f"${tmr:.2f}", f"{(tmr/curr-1)*100:+.2f}%")
+            st.metric("+7일", f"${w7:.2f}", f"{(w7/curr-1)*100:+.2f}%")
+            st.metric("+30일", f"${m30:.2f}", f"{(m30/curr-1)*100:+.2f}%", delta_color="normal")
 
-st.caption("완벽 동작 확인 완료 - 2025.11.22")
+st.caption("2025.11.22 — ")
