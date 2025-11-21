@@ -20,13 +20,15 @@ def get_db_connection():
 def init_db():
     conn = get_db_connection()
     c = conn.cursor()
+    # [수정] shares INTEGER -> REAL (소수점 지원)
     c.execute('''CREATE TABLE IF NOT EXISTS holdings
-                 (ticker TEXT PRIMARY KEY, shares INTEGER, avg_price REAL, sort_order INTEGER)''')
+                 (ticker TEXT PRIMARY KEY, shares REAL, avg_price REAL, sort_order INTEGER)''')
     c.execute('''CREATE TABLE IF NOT EXISTS cash
                  (currency TEXT PRIMARY KEY, amount REAL)''')
+    # [수정] shares INTEGER -> REAL
     c.execute('''CREATE TABLE IF NOT EXISTS trade_logs
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  date TEXT, ticker TEXT, action TEXT, shares INTEGER, price REAL, note TEXT, realized_pnl REAL)''')
+                  date TEXT, ticker TEXT, action TEXT, shares REAL, price REAL, note TEXT, realized_pnl REAL)''')
     
     try: c.execute("SELECT sort_order FROM holdings LIMIT 1")
     except sqlite3.OperationalError: c.execute("ALTER TABLE holdings ADD COLUMN sort_order INTEGER DEFAULT 99")
@@ -56,7 +58,7 @@ def add_log(ticker, action, shares, price, note="", pnl=0.0):
     except sqlite3.OperationalError:
         c.execute('''CREATE TABLE IF NOT EXISTS trade_logs
                      (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                      date TEXT, ticker TEXT, action TEXT, shares INTEGER, price REAL, note TEXT, realized_pnl REAL)''')
+                      date TEXT, ticker TEXT, action TEXT, shares REAL, price REAL, note TEXT, realized_pnl REAL)''')
         c.execute("INSERT INTO trade_logs (date, ticker, action, shares, price, note, realized_pnl) VALUES (?, ?, ?, ?, ?, ?, ?)", 
                   (now, ticker, action, shares, price, note, pnl))
     conn.commit()
@@ -84,25 +86,22 @@ def update_cash(amount):
     conn.commit()
     conn.close()
 
-# [Helper] 현재 현금 가져오기
 def get_current_cash(conn):
     c = conn.cursor()
     c.execute("SELECT amount FROM cash WHERE currency='USD'")
     row = c.fetchone()
     return row[0] if row else 0.0
 
-# [매수 Logic] - 현금 차감 추가
+# [매수 Logic]
 def add_stock(ticker, new_shares, new_price):
     conn = get_db_connection()
     c = conn.cursor()
     
-    # 1. 현금 처리
     current_cash = get_current_cash(conn)
     cost = new_shares * new_price
     new_cash_balance = current_cash - cost
     c.execute("INSERT OR REPLACE INTO cash VALUES (?, ?)", ('USD', new_cash_balance))
     
-    # 2. 주식 처리
     c.execute("SELECT shares, avg_price FROM holdings WHERE ticker=?", (ticker,))
     row = c.fetchone()
     
@@ -113,7 +112,6 @@ def add_stock(ticker, new_shares, new_price):
         new_avg = total_cost_stock / total_shares if total_shares > 0 else 0.0
         c.execute("UPDATE holdings SET shares=?, avg_price=? WHERE ticker=?", (total_shares, new_avg, ticker))
         conn.commit(); conn.close()
-        
         add_log(ticker, "추가 매수", new_shares, new_price, f"현금차감: -${cost:,.2f}", 0.0)
         st.toast(f"➕ 매수 완료! 현금 -${cost:,.2f}")
     else:
@@ -121,36 +119,34 @@ def add_stock(ticker, new_shares, new_price):
         res = c.fetchone(); max_order = res[0] if res and res[0] else 0; next_order = max_order + 1
         c.execute("INSERT INTO holdings VALUES (?, ?, ?, ?)", (ticker, new_shares, new_price, next_order))
         conn.commit(); conn.close()
-        
         add_log(ticker, "신규 매수", new_shares, new_price, f"현금차감: -${cost:,.2f}", 0.0)
         st.toast(f"🆕 신규 매수! 현금 -${cost:,.2f}")
 
-# [매도 Logic] - 현금 입금 추가
+# [매도 Logic]
 def sell_stock(ticker, sell_shares, sell_price):
     conn = get_db_connection()
     c = conn.cursor()
     
-    # 1. 보유 확인
     c.execute("SELECT shares, avg_price FROM holdings WHERE ticker=?", (ticker,))
     row = c.fetchone()
     
     if row:
         old_shares, old_avg = row
-        if sell_shares > old_shares:
+        # 소수점 오차 고려하여 비교 (약간의 여유)
+        if sell_shares > old_shares + 0.000001:
             st.error(f"❌ 매도 불가: 보유 수량({old_shares}주)보다 많이 팔 수 없습니다.")
             conn.close(); return
 
-        # 2. 현금 처리 (돈 받기)
         current_cash = get_current_cash(conn)
         revenue = sell_shares * sell_price
         new_cash_balance = current_cash + revenue
         c.execute("INSERT OR REPLACE INTO cash VALUES (?, ?)", ('USD', new_cash_balance))
 
-        # 3. 주식 처리
         new_shares = old_shares - sell_shares
         realized_pnl = (sell_price - old_avg) * sell_shares 
         
-        if new_shares == 0:
+        # 소수점 잔고가 거의 0이면 삭제
+        if new_shares < 0.000001:
             c.execute("DELETE FROM holdings WHERE ticker=?", (ticker,))
             conn.commit(); conn.close()
             add_log(ticker, "전량 매도", sell_shares, sell_price, f"현금입금: +${revenue:,.2f}", realized_pnl)
@@ -220,13 +216,14 @@ def display_global_dashboard():
 display_global_dashboard()
 
 # ---------------------------------------------------------
-# 2. 핵심 로직
+# 2. 핵심 로직 (백테스팅) - 소수점 매매 지원 수정
 # ---------------------------------------------------------
 def run_backtest(df, initial_cash, mode, target_weight, trigger_up, sell_pct, trigger_down, buy_pct):
     cash = initial_cash
     start_price = df.iloc[0]['Close']
     initial_invest = (initial_cash * (target_weight / 100))
-    shares = math.floor(initial_invest / start_price)
+    # [수정] 소수점 매매 허용 (floor 제거)
+    shares = initial_invest / start_price 
     cash -= shares * start_price
     last_rebal_price = start_price 
     history = []; trade_log = []
@@ -241,7 +238,8 @@ def run_backtest(df, initial_cash, mode, target_weight, trigger_up, sell_pct, tr
         elif mode == 'WEIGHT': 
             if current_weight >= target_weight + trigger_up: should_sell = True
         if should_sell:
-            sell_qty = math.floor(shares * (sell_pct / 100))
+            # [수정] 소수점 매도
+            sell_qty = shares * (sell_pct / 100) 
             if sell_qty > 0:
                 shares -= sell_qty; cash += sell_qty * price
                 pct_diff = (price - last_rebal_price)/last_rebal_price*100
@@ -255,7 +253,8 @@ def run_backtest(df, initial_cash, mode, target_weight, trigger_up, sell_pct, tr
                 if current_weight <= target_weight - trigger_down: should_buy = True
             if should_buy:
                 invest_amt = cash * (buy_pct / 100)
-                buy_qty = math.floor(invest_amt / price)
+                # [수정] 소수점 매수
+                buy_qty = invest_amt / price 
                 if buy_qty > 0:
                     shares += buy_qty; cash -= buy_qty * price
                     pct_diff = (price - last_rebal_price)/last_rebal_price*100
@@ -292,7 +291,10 @@ with col_side:
     st.subheader("내 투자")
     my_stocks, my_cash = get_portfolio()
     current_cash = my_cash.iloc[0]['amount'] if not my_cash.empty else 0.0
-    total_value = current_cash; daily_pnl = 0.0
+    
+    # 자산 계산
+    total_stock_val = 0.0
+    daily_pnl = 0.0
     
     if not my_stocks.empty:
         for index, row in my_stocks.iterrows():
@@ -302,18 +304,24 @@ with col_side:
                 if len(stock_data) >= 2:
                     cur_price = stock_data['Close'].iloc[-1]; prev_close = stock_data['Close'].iloc[-2]
                     val = cur_price * shares
-                    total_value += val; daily_pnl += (cur_price - prev_close) * shares
+                    total_stock_val += val
+                    daily_pnl += (cur_price - prev_close) * shares
                     with st.container(border=True):
                         c1, c2 = st.columns([1.2, 1])
                         if c1.button(f"{ticker}", key=f"btn_{ticker}", use_container_width=True, on_click=set_ticker, args=(ticker,)): pass
-                        c1.caption(f"{shares}주")
+                        # [수정] 소수점 수량 표시
+                        c1.caption(f"{shares:g}주") 
                         profit_pct = (cur_price - row['avg_price']) / row['avg_price'] * 100
                         color = "red" if profit_pct > 0 else "blue"
                         c2.markdown(f"${val:,.0f}")
                         c2.markdown(f":{color}[{profit_pct:.1f}%]")
             except: pass
 
+    total_value = total_stock_val + current_cash
+
+    # [신규] 자산 구성 내역 표시
     st.metric(label="총 자산 (USD)", value=f"${total_value:,.2f}", delta=f"${daily_pnl:,.2f} (오늘)")
+    st.caption(f"📊 주식 ${total_stock_val:,.2f} + 💵 현금 ${current_cash:,.2f}")
     
     if st.button("📈 자산 추이 (Simulation)", use_container_width=True):
         if not my_stocks.empty:
@@ -342,7 +350,8 @@ with col_side:
         st.caption("티커 입력 후 매수/매도 선택")
         input_ticker = st.text_input("티커 (예: TQQQ)").upper()
         c_sh, c_pr = st.columns(2)
-        input_shares = c_sh.number_input("수량", min_value=1, step=1)
+        # [수정] 소수점 입력 가능하도록 step 변경
+        input_shares = c_sh.number_input("수량", min_value=0.000001, step=0.01, format="%.6f")
         input_avg = c_pr.number_input("단가 ($)", min_value=0.0)
         is_overwrite = st.checkbox("단순 정보 수정 (덮어쓰기)")
         col_buy, col_sell = st.columns(2)
@@ -383,7 +392,7 @@ with col_side:
             st.divider()
             log_to_del = st.selectbox("삭제할 로그", options=logs['id'], format_func=lambda x: f"#{x}: {logs[logs['id']==x].iloc[0]['action']} ({logs[logs['id']==x].iloc[0]['ticker']})")
             if st.button("선택 로그 삭제"): delete_log(log_to_del); st.rerun()
-            st.dataframe(logs[['date', 'ticker', 'action', 'shares', 'price', 'realized_pnl', 'note']], column_config={"price": st.column_config.NumberColumn("단가", format="$%.2f"), "realized_pnl": st.column_config.NumberColumn("손익($)", format="$%.2f")}, hide_index=True, use_container_width=True)
+            st.dataframe(logs[['date', 'ticker', 'action', 'shares', 'price', 'realized_pnl', 'note']], column_config={"price": st.column_config.NumberColumn("단가", format="$%.2f"), "realized_pnl": st.column_config.NumberColumn("손익($)", format="$%.2f"), "shares": st.column_config.NumberColumn("수량", format="%g")}, hide_index=True, use_container_width=True)
         else: st.info("기록 없음")
 
 # --- [좌측 패널] 메인 차트 ---
