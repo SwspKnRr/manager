@@ -164,15 +164,16 @@ with tab1:
     st.markdown("#### 🎯 리밸런싱 최적 파라미터 검색 (5년 백테스팅)")
     target = st.selectbox("대상 종목 선택", tickers, key="rebal_target")
 
-    if st.button("🔍 최적 파라미터 검색 (30~50초 소요)", key="run_backtest"):
-        with st.spinner(f"{target} 백테스팅 중..."):
+    if st.button("🔍 최적 파라미터 검색 (30~60초 소요)", key="run_backtest"):
+        with st.spinner(f"{target} 5년 백테스팅 중..."):
             try:
                 data = yf.download(target, period="5y", progress=False, auto_adjust=True)
                 if data.empty or 'Close' not in data.columns:
                     st.error("데이터를 불러오지 못했습니다.")
                     st.stop()
 
-                price = data['Close'].ffill().bfill()  # 결측치 완벽 제거
+                price = data['Close'].copy()
+                price = price.ffill().bfill()
                 returns = price.pct_change().fillna(0.0)
 
                 best_cagr = -999.0
@@ -182,11 +183,11 @@ with tab1:
                     for down_th in np.arange(-0.30, -0.06, 0.04):
                         for sell_ratio in [0.5, 0.75, 1.0]:
                             cash = 2000.0
-                            shares = 10000.0 / price.iloc[0]
+                            shares = 10000.0 / float(price.iloc[0])
 
                             for i in range(1, len(price)):
-                                r = float(returns.iloc[i])               # 무조건 float 변환
-                                curr_price = float(price.iloc[i])         # 무조건 float 변환
+                                r = float(returns.iloc[i])
+                                curr_price = float(price.iloc[i])
 
                                 if r >= up_th:
                                     sell = shares * sell_ratio
@@ -198,9 +199,9 @@ with tab1:
                                     cash -= buy * curr_price
 
                             final_value = shares * float(price.iloc[-1]) + cash
-                            cagr = float((final_value / 12000) ** (1/5) - 1)   # 여기서도 float 강제
+                            cagr = float((final_value / 12000) ** (1/5) - 1)
 
-                            if cagr > best_cagr:                                # 이제 절대 pandas 안 남음
+                            if cagr > best_cagr:
                                 best_cagr = cagr
                                 best_param = (up_th, down_th, sell_ratio, final_value)
 
@@ -209,20 +210,24 @@ with tab1:
                 else:
                     up, down, ratio, final = best_param
                     st.success("🎉 최적 리밸런싱 파라미터 발견!")
-                    st.markdown(f"""
-                    **{target} 최적 전략**
-                    - **+{up*100:.1f}% 이상 상승** → 보유 주식의 **{ratio*100:.0f}% 매도**
-                    - **{down*100:.1f}% 이하 하락** → 현금의 **80% 물타기 매수**
-                    - 초기 현금 비율: 16.7% ($2,000 / $12,000)
-                    - **5년 백테스트 결과**
-                      → 최종 자산: **${final:,.0f}**
-                      → 연평균 수익률 (CAGR): **{best_cagr*100:+.2f}%**
-                    """)
                     st.balloons()
 
+                    # 여기서 .format 대신 f-string + round 사용해서 Series.format 에러 완전 차단
+                    st.markdown(f"""
+                    **{target} 최적 리밸런싱 전략**
+
+                    - **+{up*100:.1f}% 이상 상승** → 보유 주식의 **{ratio*100:.0f}% 매도**
+                    - **{down*100:.1f}% 이하 하락** → 현금의 **80% 물타기 매수**
+                    - 초기 자본: $12,000 (현금 $2,000 포함)
+
+                    **5년 백테스팅 결과**
+                    - 최종 자산: **${final:,.0f}**
+                    - 연평균 수익률 (CAGR): **{best_cagr*100:+.2f}%**
+                    """)
+
             except Exception as e:
-                st.error(f"백테스팅 중 오류 발생: {str(e)}")
-                
+                st.error(f"백테스팅 오류: {str(e)}")
+
 with tab2:
     scores = {}
     for t in tickers:
