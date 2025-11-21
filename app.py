@@ -40,23 +40,43 @@ if "portfolio" not in st.session_state:
 
 df = st.session_state.portfolio
 
+# ------------------------------- 사이드바 -------------------------------
+st.sidebar.header("💼 포트폴리오 입력 (USD 기준)")
+
+# 세션 초기화 (최초 1회만 실행)
+if "portfolio" not in st.session_state:
+    try:
+        with open("portfolio.json", "r") as f:
+            data = json.load(f)
+            st.session_state.portfolio = pd.DataFrame(data["holdings"])
+            st.session_state.cash_usd = float(data["cash"])
+    except:
+        st.session_state.portfolio = pd.DataFrame(columns=["ticker", "shares", "avg_price"])
+        st.session_state.cash_usd = 10000.0
+
+df = st.session_state.portfolio  # 실시간으로 반영되는 DataFrame
+
 # 종목 추가/수정 폼
 with st.sidebar.form(key="add_stock_form"):
-    ticker = st.text_input("티커", placeholder="QQQ, TQQQ 등").upper().strip()
+    ticker = st.text_input("티커 (예: QQQ)", placeholder="티커 입력").upper().strip()
     shares = st.number_input("보유 주수", min_value=0, step=1, value=0)
     avg_price = st.number_input("평균 단가 (USD)", min_value=0.0, format="%.2f", value=0.0)
     
-    if st.form_submit_button("✅ 추가/수정") and ticker:
-        if ticker = ticker.upper().strip()
+    submitted = st.form_submit_button("✅ 추가 / 수정")
+    
+    if submitted and ticker:
+        # 여기서 = 를 == 로 바꿨음! (이게 SyntaxError 원인)
+        ticker = ticker.upper().strip()
+        
         if ticker in df["ticker"].values:
-            df.loc[df.ticker == ticker, ["shares", "avg_price"]] = [shares, avg_price]
+            df.loc[df["ticker"] == ticker, ["shares", "avg_price"]] = [shares, avg_price]
             st.success(f"{ticker} 수정 완료")
         else:
             new_row = pd.DataFrame([{"ticker": ticker, "shares": shares, "avg_price": avg_price}])
             df = pd.concat([df, new_row], ignore_index=True)
             st.success(f"{ticker} 추가 완료")
         
-        # 저장
+        # 즉시 세션 + 파일 저장
         st.session_state.portfolio = df
         with open("portfolio.json", "w") as f:
             json.dump({
@@ -65,33 +85,34 @@ with st.sidebar.form(key="add_stock_form"):
             }, f)
         st.rerun()
 
-# 현금 잔고 입력 (실시간 저장)
+# 현금 잔고 실시간 입력 & 자동 저장
 st.sidebar.markdown("---")
-current_cash = st.sidebar.number_input(
+updated_cash = st.sidebar.number_input(
     "💰 현금 잔고 (USD)",
     min_value=0.0,
     value=float(st.session_state.cash_usd),
     step=500.0,
-    format="%.2f"
+    format="%.2f",
+    key="cash_input_key"  # key 충돌 방지
 )
 
-# 현금 바뀌면 바로 저장
-if abs(current_cash - st.session_state.cash_usd) > 0.01:
-    st.session_state.cash_usd = current_cash
+# 값이 바뀌면 바로 저장 + 새로고침
+if abs(updated_cash - st.session_state.cash_usd) > 0.01:
+    st.session_state.cash_usd = updated_cash
     with open("portfolio.json", "w") as f:
         json.dump({
             "holdings": st.session_state.portfolio.to_dict("records"),
             "cash": float(st.session_state.cash_usd)
         }, f)
-    st.rerun()  # UI 즉시 반영
+    st.rerun()
 
-# 포트폴리오 초기화 버튼 (선택사항)
-if st.sidebar.button("🗑️ 포트폴리오 초기화"):
+# 포트폴리오 초기화 (옵션)
+if st.sidebar.button("🗑️ 전체 초기화"):
     st.session_state.portfolio = pd.DataFrame(columns=["ticker", "shares", "avg_price"])
     st.session_state.cash_usd = 0.0
     with open("portfolio.json", "w") as f:
         json.dump({"holdings": [], "cash": 0.0}, f)
-    st.success("초기화 완료")
+    st.success("포트폴리오 초기화 완료")
     st.rerun()
 
 if df.empty:
