@@ -56,7 +56,6 @@ def run_backtest(df, initial_cash, mode, target_weight, trigger_up, sell_pct, tr
     start_price = df.iloc[0]['Close']
     
     # 초기 세팅: 자산의 'target_weight'% 만큼 매수하고 시작
-    # WEIGHT 모드일 때 의미가 크며, RATE 모드일 때도 초기 진입 비중으로 활용
     initial_invest = (initial_cash * (target_weight / 100))
     shares = math.floor(initial_invest / start_price)
     cash -= shares * start_price
@@ -132,14 +131,14 @@ def run_backtest(df, initial_cash, mode, target_weight, trigger_up, sell_pct, tr
     return df, trade_log, final_return, buy_hold_return
 
 
-# [최적화 콜백 함수] - 이 부분이 누락되어 에러가 났었습니다.
+# [최적화 콜백 함수]
 def optimize_params(df, fixed_b, fixed_d, target_w):
     if len(df) < 10:
         st.toast("❌ 데이터가 부족합니다.")
         return
 
     best_ret = -9999
-    # 기본값 저장 (검색 실패 시 유지를 위해)
+    # 기본값 저장
     best_params = (st.session_state.get('mode', 'RATE'), 
                    st.session_state.get('up_a', 10.0), 
                    st.session_state.get('down_c', 10.0))
@@ -163,7 +162,7 @@ def optimize_params(df, fixed_b, fixed_d, target_w):
                     best_ret = ret
                     best_params = (m, a_val, c_val)
     
-    # Session State 업데이트 (화면 리프레시 전 값 변경)
+    # Session State 업데이트
     st.session_state['mode'] = best_params[0]
     st.session_state['up_a'] = best_params[1]
     st.session_state['down_c'] = best_params[2]
@@ -269,8 +268,9 @@ with col_main:
                     key='mode'
                 )
                 
+                # [수정된 부분] st.session_state 할당 제거
                 if selected_mode == 'WEIGHT':
-                    st.session_state['target_w'] = st.slider("목표 주식 비중 (%)", 10, 90, key='target_w', step=10)
+                    st.slider("목표 주식 비중 (%)", 10, 90, key='target_w', step=10)
                 
                 st.divider()
 
@@ -285,7 +285,7 @@ with col_main:
                 in_down_C = st.slider(lbl_down, 1.0, 30.0, key='down_c', step=0.5)
                 in_buy_D = st.slider("D: 매수 물량 (현금의 %)", 10, 100, key='buy_d', step=10)
 
-            # [중요] 위에서 정의한 함수를 연결
+            # 최적화 버튼
             st.button(
                 "✨ 전략 완전 탐색 (Auto-Tune)", 
                 on_click=optimize_params, 
