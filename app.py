@@ -17,29 +17,17 @@ if 'search_ticker' not in st.session_state:
 def init_db():
     conn = sqlite3.connect('portfolio.db')
     c = conn.cursor()
-    
-    # 포트폴리오 테이블
     c.execute('''CREATE TABLE IF NOT EXISTS holdings
                  (ticker TEXT PRIMARY KEY, shares INTEGER, avg_price REAL, sort_order INTEGER)''')
-    # 현금 테이블
     c.execute('''CREATE TABLE IF NOT EXISTS cash
                  (currency TEXT PRIMARY KEY, amount REAL)''')
-    # [신규] 매매 일지 테이블
     c.execute('''CREATE TABLE IF NOT EXISTS trade_logs
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  date TEXT,
-                  ticker TEXT,
-                  action TEXT,
-                  shares INTEGER,
-                  price REAL,
-                  note TEXT)''')
-    
-    # 기존 DB 호환성 체크 (sort_order)
+                  date TEXT, ticker TEXT, action TEXT, shares INTEGER, price REAL, note TEXT)''')
     try:
         c.execute("SELECT sort_order FROM holdings LIMIT 1")
     except sqlite3.OperationalError:
         c.execute("ALTER TABLE holdings ADD COLUMN sort_order INTEGER DEFAULT 99")
-        
     conn.commit()
     conn.close()
 
@@ -49,12 +37,10 @@ def get_portfolio():
         df_holdings = pd.read_sql("SELECT * FROM holdings ORDER BY sort_order ASC, ticker ASC", conn)
         df_cash = pd.read_sql("SELECT * FROM cash", conn)
     except:
-        df_holdings = pd.DataFrame()
-        df_cash = pd.DataFrame()
+        df_holdings = pd.DataFrame(); df_cash = pd.DataFrame()
     conn.close()
     return df_holdings, df_cash
 
-# [신규] 매매 로그 기록 함수
 def add_log(ticker, action, shares, price, note=""):
     conn = sqlite3.connect('portfolio.db')
     c = conn.cursor()
@@ -64,14 +50,12 @@ def add_log(ticker, action, shares, price, note=""):
     conn.commit()
     conn.close()
 
-# [신규] 매매 로그 불러오기
 def get_logs():
     conn = sqlite3.connect('portfolio.db')
     df = pd.read_sql("SELECT * FROM trade_logs ORDER BY id DESC", conn)
     conn.close()
     return df
 
-# [신규] 매매 로그 삭제
 def delete_log(log_id):
     conn = sqlite3.connect('portfolio.db')
     c = conn.cursor()
@@ -87,37 +71,65 @@ def update_cash(amount):
     conn.commit()
     conn.close()
 
-# 주식 추가 (로그 기능 연동)
+# [매수 Logic]
 def add_stock(ticker, new_shares, new_price):
     conn = sqlite3.connect('portfolio.db')
     c = conn.cursor()
-    
-    c.execute("SELECT shares, avg_price, sort_order FROM holdings WHERE ticker=?", (ticker,))
+    c.execute("SELECT shares, avg_price FROM holdings WHERE ticker=?", (ticker,))
     row = c.fetchone()
     
     if row:
-        old_shares, old_avg, sort_order = row
+        old_shares, old_avg = row
         total_shares = old_shares + new_shares
-        if total_shares > 0:
-            total_cost = (old_shares * old_avg) + (new_shares * new_price)
-            new_avg = total_cost / total_shares
-        else:
-            new_avg = 0.0
+        total_cost = (old_shares * old_avg) + (new_shares * new_price)
+        new_avg = total_cost / total_shares if total_shares > 0 else 0.0
         c.execute("UPDATE holdings SET shares=?, avg_price=? WHERE ticker=?", (total_shares, new_avg, ticker))
-        add_log(ticker, "추가 매수", new_shares, new_price, f"평단갱신: ${old_avg:.2f} -> ${new_avg:.2f}")
-        st.toast(f"➕ 추가 매수: {ticker} (총 {total_shares}주)")
+        add_log(ticker, "추가 매수", new_shares, new_price, f"평단: ${old_avg:.2f}->${new_avg:.2f}")
+        st.toast(f"➕ 매수 완료: {ticker}")
     else:
         c.execute("SELECT MAX(sort_order) FROM holdings")
         max_order = c.fetchone()[0]
         next_order = (max_order + 1) if max_order else 1
         c.execute("INSERT INTO holdings VALUES (?, ?, ?, ?)", (ticker, new_shares, new_price, next_order))
-        add_log(ticker, "신규 매수", new_shares, new_price, "포트폴리오 편입")
+        add_log(ticker, "신규 매수", new_shares, new_price, "신규 편입")
         st.toast(f"🆕 신규 매수: {ticker}")
-
     conn.commit()
     conn.close()
 
-# 주식 덮어쓰기 (로그 기능 연동)
+# [신규] 매도 Logic
+def sell_stock(ticker, sell_shares, sell_price):
+    conn = sqlite3.connect('portfolio.db')
+    c = conn.cursor()
+    c.execute("SELECT shares, avg_price FROM holdings WHERE ticker=?", (ticker,))
+    row = c.fetchone()
+    
+    if row:
+        old_shares, old_avg = row
+        if sell_shares > old_shares:
+            st.error(f"❌ 매도 불가: 보유 수량({old_shares}주)보다 많이 팔 수 없습니다.")
+            conn.close()
+            return
+
+        new_shares = old_shares - sell_shares
+        
+        # 실현 손익 계산 (단순 참고용)
+        realized_pnl = (sell_price - old_avg) * sell_shares
+        
+        if new_shares == 0:
+            c.execute("DELETE FROM holdings WHERE ticker=?", (ticker,))
+            add_log(ticker, "전량 매도", sell_shares, sell_price, f"실현손익: ${realized_pnl:.2f}")
+            st.toast(f"📉 전량 매도 완료: {ticker}")
+        else:
+            # 매도 시 평단가는 변하지 않음 (이동평균법/FIFO 일반적 룰)
+            c.execute("UPDATE holdings SET shares=? WHERE ticker=?", (new_shares, ticker))
+            add_log(ticker, "부분 매도", sell_shares, sell_price, f"잔고: {new_shares}주")
+            st.toast(f"📉 부분 매도 완료: {ticker}")
+            
+        conn.commit()
+    else:
+        st.error(f"❌ 매도 불가: 보유하지 않은 종목입니다 ({ticker})")
+    conn.close()
+
 def overwrite_stock(ticker, shares, price):
     conn = sqlite3.connect('portfolio.db')
     c = conn.cursor()
@@ -128,16 +140,15 @@ def overwrite_stock(ticker, shares, price):
     conn.commit()
     conn.close()
     add_log(ticker, "정보 수정", shares, price, "강제 덮어쓰기")
-    st.toast(f"✏️ 정보 수정: {ticker}")
+    st.toast(f"✏️ 수정 완료: {ticker}")
 
-# 주식 삭제 (로그 기능 연동)
 def delete_stock(ticker):
     conn = sqlite3.connect('portfolio.db')
     c = conn.cursor()
     c.execute("DELETE FROM holdings WHERE ticker=?", (ticker,))
     conn.commit()
     conn.close()
-    add_log(ticker, "종목 삭제", 0, 0, "포트폴리오 제외")
+    add_log(ticker, "종목 삭제", 0, 0, "관리자 삭제")
     st.toast(f"🗑️ 삭제 완료: {ticker}")
 
 def update_sort_orders(df_edited):
@@ -177,16 +188,14 @@ def display_global_dashboard():
                     val_str = f"{curr:,.2f}"
                     if ticker == 'KRW=X': val_str = f"{curr:,.0f}원"
                     st.metric(label=name, value=val_str, delta=f"{delta:.2f} ({pct:.2f}%)")
-                else:
-                    st.metric(label=name, value="-", delta="-")
-            except:
-                st.metric(label=name, value="Error", delta=None)
+                else: st.metric(label=name, value="-", delta="-")
+            except: st.metric(label=name, value="Loading...", delta=None)
     st.divider()
 
 display_global_dashboard()
 
 # ---------------------------------------------------------
-# 2. 핵심 로직 (백테스팅)
+# 2. 핵심 로직
 # ---------------------------------------------------------
 def run_backtest(df, initial_cash, mode, target_weight, trigger_up, sell_pct, trigger_down, buy_pct):
     cash = initial_cash
@@ -298,26 +307,42 @@ with col_side:
 
     st.divider()
     
-    # [신규] 탭 추가: 📝 일지
-    tab_edit1, tab_edit2, tab_edit3, tab_log = st.tabs(["💵 현금", "➕ 주식", "🛠️ 관리", "📝 일지"])
+    # [UI 업데이트] 매수/매도 탭 분리 통합
+    tab_edit1, tab_edit2, tab_edit3, tab_log = st.tabs(["💵 현금", "⚖️ 매매", "🛠️ 관리", "📝 일지"])
     
     with tab_edit1:
         new_cash = st.number_input("보유 현금 ($)", value=float(current_cash), step=100.0)
         if st.button("현금 업데이트"): update_cash(new_cash); st.rerun()
             
     with tab_edit2:
-        st.caption("입력 시 자동으로 합산됩니다.")
+        st.caption("티커 입력 후 매수/매도 선택")
         input_ticker = st.text_input("티커 (예: TQQQ)").upper()
+        
+        # 매매 공통 입력창
         c_sh, c_pr = st.columns(2)
-        input_shares = c_sh.number_input("추가 수량", min_value=1, step=1)
-        input_avg = c_pr.number_input("매수 단가 ($)", min_value=0.0)
-        is_overwrite = st.checkbox("단순 수정 (덮어쓰기)")
-        if st.button("매수 / 저장", use_container_width=True):
+        input_shares = c_sh.number_input("수량", min_value=1, step=1)
+        input_avg = c_pr.number_input("단가 ($)", min_value=0.0)
+        
+        is_overwrite = st.checkbox("단순 정보 수정 (덮어쓰기)")
+        
+        # 버튼 2개 (매수 / 매도)
+        col_buy, col_sell = st.columns(2)
+        
+        if col_buy.button("🔵 매수 (Buy)", use_container_width=True):
             if input_ticker:
                 if is_overwrite: overwrite_stock(input_ticker, input_shares, input_avg)
                 else: add_stock(input_ticker, input_shares, input_avg)
                 st.rerun()
-            else: st.toast("티커 입력 필요")
+            else: st.toast("티커를 입력하세요.")
+            
+        if col_sell.button("🔴 매도 (Sell)", use_container_width=True):
+            if input_ticker:
+                if is_overwrite:
+                    st.error("수정 모드에서는 매도할 수 없습니다.")
+                else:
+                    sell_stock(input_ticker, input_shares, input_avg)
+                    st.rerun()
+            else: st.toast("티커를 입력하세요.")
 
     with tab_edit3:
         if not my_stocks.empty:
@@ -333,25 +358,10 @@ with col_side:
     with tab_log:
         logs = get_logs()
         if not logs.empty:
-            # 로그 삭제 UI
-            log_to_del = st.selectbox("삭제할 로그 선택 (ID: 날짜 - 내용)", 
-                                      options=logs['id'], 
-                                      format_func=lambda x: f"#{x}: {logs[logs['id']==x].iloc[0]['date']} - {logs[logs['id']==x].iloc[0]['action']} ({logs[logs['id']==x].iloc[0]['ticker']})")
-            if st.button("선택 로그 삭제"):
-                delete_log(log_to_del)
-                st.rerun()
-            
-            # 로그 테이블 표시
-            st.dataframe(
-                logs[['date', 'ticker', 'action', 'shares', 'price', 'note']], 
-                column_config={
-                    "date": "일시", "ticker": "종목", "action": "구분", 
-                    "shares": "수량", "price": st.column_config.NumberColumn("단가", format="$%.2f"), "note": "비고"
-                },
-                hide_index=True, use_container_width=True
-            )
-        else:
-            st.info("기록된 매매 일지가 없습니다.")
+            log_to_del = st.selectbox("삭제할 로그", options=logs['id'], format_func=lambda x: f"#{x}: {logs[logs['id']==x].iloc[0]['action']} ({logs[logs['id']==x].iloc[0]['ticker']})")
+            if st.button("선택 로그 삭제"): delete_log(log_to_del); st.rerun()
+            st.dataframe(logs[['date', 'ticker', 'action', 'shares', 'price', 'note']], column_config={"price": st.column_config.NumberColumn("단가", format="$%.2f")}, hide_index=True, use_container_width=True)
+        else: st.info("기록 없음")
 
 # --- [좌측 패널] 메인 차트 ---
 with col_main:
