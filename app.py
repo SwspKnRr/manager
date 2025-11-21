@@ -198,15 +198,53 @@ with col_main:
         st.markdown("### 🛠️ 리밸런싱 & 변동성 수확 시뮬레이터")
         st.caption("과거 데이터를 바탕으로 '규칙 기반 매매'를 했을 때의 결과를 시뮬레이션합니다.")
         
-        # 데이터 준비 (1년치)
+        # 데이터 준비 (1년치) - 콜백 함수에 넘겨주기 위해 미리 로드
         hist_1y = stock.history(period="1y")
         
+        # --- [콜백 함수 정의] 최적화 로직을 별도 함수로 분리 ---
+        def optimize_params(df, fixed_b, fixed_d):
+            """
+            버튼 클릭 시 실행되는 함수입니다.
+            화면이 다시 그려지기 전에 Session State 값을 업데이트합니다.
+            """
+            if len(df) < 10:
+                st.toast("❌ 데이터가 부족하여 계산할 수 없습니다.")
+                return
+
+            best_ret = -9999
+            best_params = (st.session_state['up_a'], st.session_state['down_c']) # 기본값 유지
+            
+            # 탐색 범위 (3% ~ 20%)
+            search_ranges = [3.0, 5.0, 7.5, 10.0, 12.5, 15.0, 17.5, 20.0]
+            
+            # 진행 상황 알림 (콜백 내에서는 progress bar보다 toast 권장)
+            st.toast("🤖 최적의 파라미터를 계산 중입니다...")
+            
+            for a_val in search_ranges:
+                for c_val in search_ranges:
+                    # 백테스팅 실행
+                    _, _, ret, _ = run_backtest(
+                        df.copy(), 10000, 
+                        a_val, fixed_b, 
+                        c_val, fixed_d
+                    )
+                    if ret > best_ret:
+                        best_ret = ret
+                        best_params = (a_val, c_val)
+            
+            # 최적값 발견 시 Session State 업데이트 (여기가 핵심!)
+            st.session_state['up_a'] = best_params[0]
+            st.session_state['down_c'] = best_params[1]
+            st.toast(f"✅ 최적값 적용 완료! (수익률: {best_ret:.2f}%)")
+
+        # -------------------------------------------------------
+
         col_inputs, col_results = st.columns([1, 2])
         
         with col_inputs:
             st.markdown("#### ⚙️ 규칙 설정")
             
-            # Session State 초기화 (슬라이더 값을 제어하기 위함)
+            # Session State 초기화
             if 'up_a' not in st.session_state: st.session_state['up_a'] = 10.0
             if 'sell_b' not in st.session_state: st.session_state['sell_b'] = 50
             if 'down_c' not in st.session_state: st.session_state['down_c'] = 10.0
@@ -214,7 +252,6 @@ with col_main:
 
             with st.container(border=True):
                 st.markdown("**1. 익절(Sell) 규칙**")
-                # key를 지정하여 session_state와 연동
                 in_up_A = st.slider("A: 상승 트리거 (%)", 1.0, 30.0, key='up_a', step=0.5)
                 in_sell_B = st.slider("B: 매도 비중 (%)", 10, 100, key='sell_b', step=10)
                 
@@ -224,104 +261,53 @@ with col_main:
                 in_down_C = st.slider("C: 하락 트리거 (%)", 1.0, 30.0, key='down_c', step=0.5)
                 in_buy_D = st.slider("D: 현금 투입 비중 (%)", 10, 100, key='buy_d', step=10)
 
-            # --- [최적 파라미터 찾기 로직] ---
-            if st.button("✨ 최적 파라미터 찾기 (Auto-Tune)"):
-                if len(hist_1y) < 10:
-                    st.error("데이터가 부족합니다.")
-                else:
-                    best_ret = -9999
-                    best_params = (0, 0)
-                    
-                    # 진행률 표시바
-                    progress_text = "최적의 A(상승), C(하락) 트리거를 찾는 중..."
-                    my_bar = st.progress(0, text=progress_text)
-                    
-                    # 탐색 범위 설정 (예: 3% ~ 20% 구간을 1%~2.5% 단위로 탐색)
-                    # 너무 촘촘하면 느려지므로 적당한 간격 설정
-                    search_ranges = [3.0, 5.0, 7.5, 10.0, 12.5, 15.0, 17.5, 20.0, 25.0]
-                    total_steps = len(search_ranges) ** 2
-                    current_step = 0
-                    
-                    # Grid Search 시작
-                    for a_val in search_ranges:
-                        for c_val in search_ranges:
-                            # B와 D는 현재 설정된 값을 고정하고 A, C만 최적화
-                            _, _, ret, _ = run_backtest(
-                                hist_1y.copy(), 10000, 
-                                a_val, in_sell_B, 
-                                c_val, in_buy_D
-                            )
-                            
-                            if ret > best_ret:
-                                best_ret = ret
-                                best_params = (a_val, c_val)
-                            
-                            current_step += 1
-                            my_bar.progress(current_step / total_steps, text=progress_text)
-                    
-                    my_bar.empty()
-                    
-                    # 결과 적용 (Session State 업데이트)
-                    st.session_state['up_a'] = best_params[0]
-                    st.session_state['down_c'] = best_params[1]
-                    
-                    st.success(f"최적값 발견! 수익률: {best_ret:.2f}% (A={best_params[0]}%, C={best_params[1]}%)")
-                    
-                    # 화면 새로고침하여 슬라이더 값 반영
-                    st.rerun()
+            # 버튼에 on_click 콜백 연결
+            st.button("✨ 최적 파라미터 찾기 (Auto-Tune)", 
+                      on_click=optimize_params, 
+                      args=(hist_1y, in_sell_B, in_buy_D))
 
         with col_results:
-            # 현재 슬라이더 값으로 시뮬레이션 실행 및 결과 표시
+            # 현재 설정된 값으로 결과 표시
             if len(hist_1y) > 0:
-                # 초기 자본금 $10,000 가정
                 df_res, logs, final_ret, bh_ret = run_backtest(
                     hist_1y.copy(), 10000, in_up_A, in_sell_B, in_down_C, in_buy_D
                 )
                 
-                # 1. 수익률 비교 지표
+                # 1. 수익률 지표
                 m1, m2, m3 = st.columns(3)
-                m1.metric("내 전략 수익률", f"{final_ret:.2f}%", delta=f"{final_ret - bh_ret:.2f}%p (vs존버)")
-                m2.metric("단순 보유(존버) 수익률", f"{bh_ret:.2f}%")
+                m1.metric("내 전략 수익률", f"{final_ret:.2f}%", delta=f"{final_ret - bh_ret:.2f}%p")
+                m2.metric("단순 보유 수익률", f"{bh_ret:.2f}%")
                 m3.metric("매매 횟수", f"{len(logs)}회")
                 
-                # 2. 그래프 그리기 (Plotly)
+                # 2. 그래프
                 fig_back = go.Figure()
-                # 전략 자산
                 fig_back.add_trace(go.Scatter(x=df_res.index, y=df_res['Strategy_Asset'], 
-                                    mode='lines', name='전략 자산', line=dict(color='#ef4444', width=2))) # 토스 레드
-                # 단순 보유
+                                    mode='lines', name='전략 자산', line=dict(color='#ef4444', width=2)))
+                
                 norm_factor = 10000 / df_res['Close'].iloc[0]
                 fig_back.add_trace(go.Scatter(x=df_res.index, y=df_res['Close']*norm_factor, 
                                     mode='lines', name='단순 보유', line=dict(color='#e5e7eb', dash='dot')))
                 
-                # 매매 타점
                 buy_dates = [x['date'] for x in logs if '매수' in x['type']]
                 buy_prices = [df_res.loc[d]['Strategy_Asset'] for d in buy_dates]
                 sell_dates = [x['date'] for x in logs if '매도' in x['type']]
                 sell_prices = [df_res.loc[d]['Strategy_Asset'] for d in sell_dates]
 
                 fig_back.add_trace(go.Scatter(x=buy_dates, y=buy_prices, mode='markers', 
-                                              name='매수', marker=dict(color='#3b82f6', symbol='triangle-up', size=12)))
+                                              name='매수', marker=dict(color='#3b82f6', symbol='triangle-up', size=10)))
                 fig_back.add_trace(go.Scatter(x=sell_dates, y=sell_prices, mode='markers', 
-                                              name='매도', marker=dict(color='#ef4444', symbol='triangle-down', size=12)))
+                                              name='매도', marker=dict(color='#ef4444', symbol='triangle-down', size=10)))
 
                 fig_back.update_layout(
                     title="자산 증감 추이 (1년)", 
-                    xaxis_title="", 
-                    yaxis_title="자산 가치 ($)", 
-                    hovermode="x unified",
-                    template="plotly_white",
                     margin=dict(l=0, r=0, t=30, b=0),
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
                 )
                 st.plotly_chart(fig_back, use_container_width=True)
                 
-                # 3. 로그
                 with st.expander("📋 매매 기록 상세"):
                     if logs:
                         st.dataframe(pd.DataFrame(logs).style.format({'price': '${:.2f}', 'profit': '{:.2f}%', 'new_avg': '${:.2f}'}), use_container_width=True)
-                    else:
-                        st.caption("매매 기록이 없습니다.")
         
     with tab2:
         st.write("### 퀀트 기반 매매 신호")
