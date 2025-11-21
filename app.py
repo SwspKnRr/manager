@@ -47,19 +47,21 @@ init_db()
 # 2. 핵심 로직 함수들 (UI보다 반드시 위에 정의되어야 함)
 # ---------------------------------------------------------
 
-# [백테스팅 엔진]
+# [백테스팅 엔진 - 로직 개선됨]
 def run_backtest(df, initial_cash, mode, target_weight, trigger_up, sell_pct, trigger_down, buy_pct):
     """
-    mode: 'RATE' (평단가 기준 수익률) or 'WEIGHT' (전체 포트폴리오 내 비중)
+    mode: 'VALUE' (주식 평가액 변동 기준) or 'WEIGHT' (포트폴리오 비중 변동 기준)
     """
     cash = initial_cash
     start_price = df.iloc[0]['Close']
     
-    # 초기 세팅: 자산의 'target_weight'% 만큼 매수하고 시작
+    # 초기 세팅
     initial_invest = (initial_cash * (target_weight / 100))
     shares = math.floor(initial_invest / start_price)
     cash -= shares * start_price
-    avg_price = start_price
+    
+    # 기준 가격 (마지막 리밸런싱 시점의 가격)
+    last_rebal_price = start_price 
     
     history = [] 
     trade_log = []
@@ -72,13 +74,17 @@ def run_backtest(df, initial_cash, mode, target_weight, trigger_up, sell_pct, tr
         total_val = cash + stock_val
         current_weight = (stock_val / total_val * 100) if total_val > 0 else 0
         
-        # --- 매도(익절) 조건 체크 ---
+        action_taken = False # 하루에 매수/매도 중 하나만 발생하도록
+        
+        # --- 1. 매도(익절) 체크 ---
         should_sell = False
         
-        if mode == 'RATE': # 1. 평단가 기준 수익률
-            if shares > 0 and price >= avg_price * (1 + trigger_up/100):
+        if mode == 'VALUE': # 주식 평가액(주가) 변동 기준
+            # "직전 리밸런싱 가격" 대비 A% 상승했는가?
+            if shares > 0 and price >= last_rebal_price * (1 + trigger_up/100):
                 should_sell = True
-        elif mode == 'WEIGHT': # 2. 포트폴리오 비중 기준
+        elif mode == 'WEIGHT': # 포트폴리오 비중 기준
+            # 현재 비중이 목표치보다 A%p 높은가?
             if current_weight >= target_weight + trigger_up:
                 should_sell = True
                 
@@ -87,38 +93,47 @@ def run_backtest(df, initial_cash, mode, target_weight, trigger_up, sell_pct, tr
             if sell_qty > 0:
                 shares -= sell_qty
                 cash += sell_qty * price
-                profit_rate = (price - avg_price)/avg_price*100 if avg_price > 0 else 0
+                
+                # 기록
+                pct_diff = (price - last_rebal_price)/last_rebal_price*100
                 trade_log.append({
                     "date": date, "type": "🔴 매도", "price": price, "qty": sell_qty, 
-                    "cause": f"{'수익률' if mode=='RATE' else '비중'}({profit_rate:.1f}%/{current_weight:.1f}%)"
+                    "cause": f"{'주가상승' if mode=='VALUE' else '비중초과'} (+{pct_diff:.1f}% / {current_weight:.1f}%)"
                 })
-
-        # --- 매수(추매) 조건 체크 ---
-        should_buy = False
-        
-        if mode == 'RATE':
-            # 평단가 대비 하락 or 보유량 0일때
-            if price <= avg_price * (1 - trigger_down/100) or (shares == 0 and cash > price):
-                should_buy = True
-        elif mode == 'WEIGHT':
-            # 목표 비중보다 낮아지면
-            if current_weight <= target_weight - trigger_down:
-                should_buy = True
-        
-        if should_buy:
-            invest_amt = cash * (buy_pct / 100)
-            buy_qty = math.floor(invest_amt / price)
-            
-            if buy_qty > 0:
-                total_val_temp = (shares * avg_price) + (buy_qty * price)
-                shares += buy_qty
-                cash -= buy_qty * price
-                avg_price = total_val_temp / shares
                 
-                trade_log.append({
-                    "date": date, "type": "🔵 매수", "price": price, "qty": buy_qty, 
-                    "cause": f"{'저가' if mode=='RATE' else '비중미달'}"
-                })
+                # [중요] 리밸런싱이 일어났으므로 기준 가격 갱신
+                last_rebal_price = price 
+                action_taken = True
+
+        # --- 2. 매수(추매) 체크 (매도 안 했을 때만) ---
+        if not action_taken:
+            should_buy = False
+            
+            if mode == 'VALUE':
+                # "직전 리밸런싱 가격" 대비 C% 하락했는가?
+                if price <= last_rebal_price * (1 - trigger_down/100) or (shares == 0 and cash > price):
+                    should_buy = True
+            elif mode == 'WEIGHT':
+                # 현재 비중이 목표치보다 C%p 낮은가?
+                if current_weight <= target_weight - trigger_down:
+                    should_buy = True
+            
+            if should_buy:
+                invest_amt = cash * (buy_pct / 100)
+                buy_qty = math.floor(invest_amt / price)
+                
+                if buy_qty > 0:
+                    shares += buy_qty
+                    cash -= buy_qty * price
+                    
+                    pct_diff = (price - last_rebal_price)/last_rebal_price*100
+                    trade_log.append({
+                        "date": date, "type": "🔵 매수", "price": price, "qty": buy_qty, 
+                        "cause": f"{'주가하락' if mode=='VALUE' else '비중미달'} ({pct_diff:.1f}% / {current_weight:.1f}%)"
+                    })
+                    
+                    # [중요] 리밸런싱이 일어났으므로 기준 가격 갱신
+                    last_rebal_price = price
 
         # 자산 기록
         total_asset = cash + (shares * price)
@@ -138,17 +153,15 @@ def optimize_params(df, fixed_b, fixed_d, target_w):
         return
 
     best_ret = -9999
-    # 기본값 저장
-    best_params = (st.session_state.get('mode', 'RATE'), 
+    best_params = (st.session_state.get('mode', 'VALUE'), 
                    st.session_state.get('up_a', 10.0), 
                    st.session_state.get('down_c', 10.0))
     
-    modes = ['RATE', 'WEIGHT']
+    modes = ['VALUE', 'WEIGHT']
     search_ranges = [3.0, 5.0, 7.5, 10.0, 12.5, 15.0, 20.0]
     
     st.toast("🤖 매매 기준과 파라미터를 전체 탐색 중입니다...")
     
-    # Grid Search
     for m in modes:
         for a_val in search_ranges:
             for c_val in search_ranges:
@@ -162,12 +175,11 @@ def optimize_params(df, fixed_b, fixed_d, target_w):
                     best_ret = ret
                     best_params = (m, a_val, c_val)
     
-    # Session State 업데이트
     st.session_state['mode'] = best_params[0]
     st.session_state['up_a'] = best_params[1]
     st.session_state['down_c'] = best_params[2]
     
-    mode_kor = "평가액(수익률)" if best_params[0] == 'RATE' else "포트폴리오 비중"
+    mode_kor = "주식 평가액(변동성)" if best_params[0] == 'VALUE' else "포트폴리오 비중"
     st.toast(f"✅ 최적값 발견! [{mode_kor}] 상한:{best_params[1]}% / 하한:{best_params[2]}%")
 
 
@@ -252,7 +264,7 @@ with col_main:
             st.markdown("#### ⚙️ 전략 설정")
             
             # Session State 초기화
-            if 'mode' not in st.session_state: st.session_state['mode'] = 'RATE'
+            if 'mode' not in st.session_state: st.session_state['mode'] = 'VALUE'
             if 'target_w' not in st.session_state: st.session_state['target_w'] = 50
             if 'up_a' not in st.session_state: st.session_state['up_a'] = 10.0
             if 'sell_b' not in st.session_state: st.session_state['sell_b'] = 50
@@ -260,7 +272,7 @@ with col_main:
             if 'buy_d' not in st.session_state: st.session_state['buy_d'] = 50
 
             with st.container(border=True):
-                mode_options = {'RATE': '📊 주식 평가액 (수익률) 기준', 'WEIGHT': '⚖️ 포트폴리오 비중 기준'}
+                mode_options = {'VALUE': '📊 주식 평가액 기준 (변동성)', 'WEIGHT': '⚖️ 포트폴리오 비중 기준'}
                 selected_mode = st.radio(
                     "매매 기준 선택", 
                     options=list(mode_options.keys()), 
@@ -268,14 +280,13 @@ with col_main:
                     key='mode'
                 )
                 
-                # [수정된 부분] st.session_state 할당 제거
                 if selected_mode == 'WEIGHT':
                     st.slider("목표 주식 비중 (%)", 10, 90, key='target_w', step=10)
                 
                 st.divider()
 
-                lbl_up = "A: 익절 기준 (+%)" if selected_mode == 'RATE' else "A: 비중 초과 허용 (+%p)"
-                lbl_down = "C: 추매 기준 (-%)" if selected_mode == 'RATE' else "C: 비중 미달 허용 (-%p)"
+                lbl_up = "A: 상승 리밸런싱 (+%)" if selected_mode == 'VALUE' else "A: 비중 초과 허용 (+%p)"
+                lbl_down = "C: 하락 리밸런싱 (-%)" if selected_mode == 'VALUE' else "C: 비중 미달 허용 (-%p)"
 
                 st.markdown("**매도(Sell) 규칙**")
                 in_up_A = st.slider(lbl_up, 1.0, 30.0, key='up_a', step=0.5)
@@ -285,18 +296,17 @@ with col_main:
                 in_down_C = st.slider(lbl_down, 1.0, 30.0, key='down_c', step=0.5)
                 in_buy_D = st.slider("D: 매수 물량 (현금의 %)", 10, 100, key='buy_d', step=10)
 
-            # 최적화 버튼
             st.button(
                 "✨ 전략 완전 탐색 (Auto-Tune)", 
                 on_click=optimize_params, 
                 args=(hist_1y, in_sell_B, in_buy_D, st.session_state['target_w'])
             )
             
-            if selected_mode == 'RATE':
-                st.caption(f"💡 **해석**: 평단가 대비 **{in_up_A}%** 오르면 팔고, **{in_down_C}%** 내리면 삽니다.")
+            if selected_mode == 'VALUE':
+                st.caption(f"💡 **해석**: (마지막 매매 가격)보다 **{in_up_A}%** 오르면 팔고, **{in_down_C}%** 내리면 삽니다.")
             else:
                 tgt = st.session_state['target_w']
-                st.caption(f"💡 **해석**: 주식 비중이 **{tgt + in_up_A:.1f}%**가 되면 팔고, **{tgt - in_down_C:.1f}%**가 되면 삽니다.")
+                st.caption(f"💡 **해석**: 주식 비중이 목표(**{tgt}%**)보다 **+{in_up_A:.1f}%p** 되면 팔고, **-{in_down_C:.1f}%p** 되면 삽니다.")
 
         with col_results:
             if len(hist_1y) > 0:
