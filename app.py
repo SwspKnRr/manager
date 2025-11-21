@@ -11,7 +11,6 @@ from datetime import datetime, timedelta
 # ---------------------------------------------------------
 st.set_page_config(page_title="My Quant Portfolio", layout="wide")
 
-# Session State 초기화 (검색어 연동을 위해 필수)
 if 'search_ticker' not in st.session_state:
     st.session_state['search_ticker'] = 'TQQQ'
 
@@ -46,7 +45,14 @@ def update_holding(ticker, shares, avg_price):
     conn.commit()
     conn.close()
 
-# 종목 바로가기 콜백 함수
+# [추가 기능 2] 현금 업데이트 함수
+def update_cash(amount):
+    conn = sqlite3.connect('portfolio.db')
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO cash VALUES (?, ?)", ('USD', amount))
+    conn.commit()
+    conn.close()
+
 def set_ticker(ticker):
     st.session_state['search_ticker'] = ticker
 
@@ -61,7 +67,7 @@ def run_backtest(df, initial_cash, mode, target_weight, trigger_up, sell_pct, tr
     cash = initial_cash
     start_price = df.iloc[0]['Close']
     
-    # 초기 세팅
+    # 초기 진입
     initial_invest = (initial_cash * (target_weight / 100))
     shares = math.floor(initial_invest / start_price)
     cash -= shares * start_price
@@ -133,7 +139,7 @@ def run_backtest(df, initial_cash, mode, target_weight, trigger_up, sell_pct, tr
     
     return df, trade_log, final_return, buy_hold_return
 
-# [최적화 콜백 함수]
+# [최적화 콜백]
 def optimize_params(df, fixed_b, fixed_d, target_w):
     if len(df) < 10:
         st.toast("❌ 데이터가 부족합니다.")
@@ -181,72 +187,127 @@ with col_side:
     st.subheader("내 투자")
     my_stocks, my_cash = get_portfolio()
     
-    current_cash = 10000.0 if my_cash.empty else my_cash.iloc[0]['amount']
+    # [개선 2] 현금 로드 및 수정 기능
+    if my_cash.empty:
+        current_cash = 0.0
+    else:
+        current_cash = my_cash.iloc[0]['amount']
+
+    # 총 자산 및 일일 변동 계산용 변수
     total_value = current_cash
+    daily_pnl = 0.0 # 오늘 총 손익
     
+    # 보유 종목 목록 표시
     if not my_stocks.empty:
         for index, row in my_stocks.iterrows():
             ticker = row['ticker']
             shares = row['shares']
             try:
-                cur_price = yf.Ticker(ticker).history(period="1d")['Close'].iloc[-1]
-                val = cur_price * shares
-                total_value += val
-                
-                with st.container(border=True):
-                    c1, c2 = st.columns([1.2, 1])
-                    # [개선 2] 버튼 클릭 시 티커 설정
-                    if c1.button(f"{ticker}", key=f"btn_{ticker}", use_container_width=True, on_click=set_ticker, args=(ticker,)):
-                        pass
-                    c1.caption(f"{shares}주")
+                # 2일치 데이터 가져오기 (어제, 오늘)
+                stock_data = yf.Ticker(ticker).history(period="5d")
+                if len(stock_data) >= 2:
+                    cur_price = stock_data['Close'].iloc[-1]
+                    prev_close = stock_data['Close'].iloc[-2]
                     
-                    profit = (cur_price - row['avg_price']) / row['avg_price'] * 100
-                    color = "red" if profit > 0 else "blue"
-                    c2.markdown(f"${val:,.0f}")
-                    c2.markdown(f":{color}[{profit:.1f}%]")
+                    val = cur_price * shares
+                    total_value += val
+                    
+                    # 오늘 손익 계산
+                    day_change = (cur_price - prev_close) * shares
+                    daily_pnl += day_change
+                    
+                    with st.container(border=True):
+                        c1, c2 = st.columns([1.2, 1])
+                        # 티커 버튼 (바로가기)
+                        if c1.button(f"{ticker}", key=f"btn_{ticker}", use_container_width=True, on_click=set_ticker, args=(ticker,)):
+                            pass
+                        c1.caption(f"{shares}주")
+                        
+                        profit_pct = (cur_price - row['avg_price']) / row['avg_price'] * 100
+                        color = "red" if profit_pct > 0 else "blue"
+                        c2.markdown(f"${val:,.0f}")
+                        c2.markdown(f":{color}[{profit_pct:.1f}%]")
             except:
                 pass
 
-    st.metric(label="총 자산 (USD)", value=f"${total_value:,.2f}")
+    # [개선 2] 총 자산 및 일일 변동 표시
+    st.metric(label="총 자산 (USD)", value=f"${total_value:,.2f}", delta=f"${daily_pnl:,.2f} (오늘)")
+    
+    # [개선 3] 총 자산 그래프 보기 버튼
+    if st.button("📈 자산 추이 (Simulation)", use_container_width=True):
+        if not my_stocks.empty:
+            with st.spinner("전체 포트폴리오 과거 데이터 계산 중..."):
+                # 모든 보유 종목의 과거 1년치 데이터를 가져와서 합산
+                tickers = my_stocks['ticker'].tolist()
+                data = yf.download(tickers, period="1y")['Close']
+                
+                # 단일 종목일 경우 Series가 되므로 DataFrame으로 변환
+                if isinstance(data, pd.Series):
+                    data = data.to_frame(name=tickers[0])
+                
+                # 포트폴리오 가치 시계열 생성 (현재 보유량 * 과거 주가 + 현재 현금)
+                # 주의: 과거에도 현재 수량을 보유했다고 가정한 시뮬레이션입니다.
+                portfolio_hist = pd.Series(current_cash, index=data.index)
+                
+                for index, row in my_stocks.iterrows():
+                    if row['ticker'] in data.columns:
+                        portfolio_hist += data[row['ticker']] * row['shares']
+                
+                # 모달(Expander)로 그래프 표시
+                with st.expander("내 포트폴리오 가치 변화 (1년)", expanded=True):
+                    fig_total = go.Figure()
+                    fig_total.add_trace(go.Scatter(x=portfolio_hist.index, y=portfolio_hist, fill='tozeroy', line=dict(color='#8b5cf6')))
+                    fig_total.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=300)
+                    st.plotly_chart(fig_total, use_container_width=True)
+        else:
+            st.toast("보유한 주식이 없습니다.")
+
     st.divider()
     
-    with st.expander("✏️ 포트폴리오 수정"):
+    # 현금 및 포트폴리오 수정 탭
+    tab_edit1, tab_edit2 = st.tabs(["💵 현금", "✏️ 주식"])
+    
+    with tab_edit1:
+        new_cash = st.number_input("보유 현금 ($)", value=float(current_cash), step=100.0)
+        if st.button("현금 업데이트"):
+            update_cash(new_cash)
+            st.rerun()
+            
+    with tab_edit2:
         input_ticker = st.text_input("티커").upper()
         input_shares = st.number_input("수량", min_value=0, step=1)
         input_avg = st.number_input("평단가 ($)", min_value=0.0)
-        if st.button("저장"):
+        if st.button("주식 저장"):
             update_holding(input_ticker, input_shares, input_avg)
             st.rerun()
 
 # --- [좌측 패널] 차트 및 분석 ---
 with col_main:
-    # [개선 2] 검색창 (Session State 연동)
     c_search, c_int, c_refresh = st.columns([2, 1, 0.5])
     with c_search:
-        # key를 지정하여 입력값을 session_state와 동기화
         search_ticker = st.text_input("종목 검색", key='search_ticker').upper()
     
-    # [개선 3] 차트 주기 및 새로고침
     with c_int:
         interval_map = {'1m': '1분', '5m': '5분', '1d': '일봉', '1wk': '주봉', '1mo': '월봉'}
         sel_interval = st.selectbox("주기", options=list(interval_map.keys()), format_func=lambda x: interval_map[x], index=2)
     with c_refresh:
-        st.write("") # 줄맞춤용
+        st.write("") 
         st.write("")
         if st.button("🔄"):
             st.rerun()
 
-    # 데이터 가져오기
     stock = yf.Ticker(search_ticker)
-    
-    # 주기별 적절한 기간 설정 (1분봉은 최근 7일만 가능 등 제한 있음)
     period_map = {'1m': '5d', '5m': '1mo', '1d': '2y', '1wk': '5y', '1mo': '10y'}
-    hist_chart = stock.history(period=period_map[sel_interval], interval=sel_interval)
+    
+    # 데이터 로드 시 예외처리
+    try:
+        hist_chart = stock.history(period=period_map[sel_interval], interval=sel_interval)
+    except:
+        hist_chart = pd.DataFrame()
     
     if hist_chart.empty:
-        st.error("데이터를 불러올 수 없습니다. 티커를 확인해주세요.")
+        st.error(f"'{search_ticker}' 데이터를 불러올 수 없습니다.")
     else:
-        # 헤더 정보
         last_price = hist_chart['Close'].iloc[-1]
         prev_price = hist_chart['Close'].iloc[-2]
         change = last_price - prev_price
@@ -254,30 +315,36 @@ with col_main:
         
         st.markdown(f"## {search_ticker} ${last_price:.2f} <span style='color:{'red' if change>0 else 'blue'}'>({pct_change:.2f}%)</span>", unsafe_allow_html=True)
 
-        # 차트 (Candlestick)
+        # 차트 생성
         fig = go.Figure(data=[go.Candlestick(x=hist_chart.index,
                     open=hist_chart['Open'], high=hist_chart['High'],
                     low=hist_chart['Low'], close=hist_chart['Close'])])
+        
+        # [개선 1] 1분봉, 5분봉일 때 x축 범위(Range) 제한 (최근 4시간)
+        if sel_interval in ['1m', '5m']:
+            # 데이터의 마지막 시간
+            end_time = hist_chart.index[-1]
+            # 시작 시간 = 마지막 시간 - 4시간
+            start_time = end_time - timedelta(hours=4)
+            # range 설정 (Zoom)
+            fig.update_xaxes(range=[start_time, end_time])
+
         fig.update_layout(xaxis_rangeslider_visible=False, height=400, margin=dict(l=0, r=0, t=0, b=0))
         st.plotly_chart(fig, use_container_width=True)
 
-        # 탭 구성
         tab1, tab2, tab3 = st.tabs(["🔄 전략 시뮬레이터", "📢 매매 신호", "📈 추세 예측"])
         
         # === Tab 1: 리밸런싱 ===
         with tab1:
             st.markdown("### 🛠️ 과거 데이터 검증 (Backtest)")
             
-            # [개선 1] 날짜 선택 기능
             col_d1, col_d2 = st.columns(2)
             with col_d1:
                 start_date = st.date_input("시작일", value=datetime.now() - timedelta(days=365))
             with col_d2:
                 end_date = st.date_input("종료일", value=datetime.now())
             
-            # 백테스팅용 데이터 별도 호출 (일봉 기준)
             hist_back = stock.history(start=start_date, end=end_date, interval="1d")
-            
             st.divider()
             
             col_inputs, col_results = st.columns([1, 2])
@@ -293,7 +360,7 @@ with col_main:
                 if 'buy_d' not in st.session_state: st.session_state['buy_d'] = 50
 
                 with st.container(border=True):
-                    mode_options = {'VALUE': '📊 주식 평가액 기준 (변동성)', 'WEIGHT': '⚖️ 포트폴리오 비중 기준'}
+                    mode_options = {'VALUE': '📊 평가액 변동 기준', 'WEIGHT': '⚖️ 비중 변동 기준'}
                     selected_mode = st.radio("매매 기준", options=list(mode_options.keys()), format_func=lambda x: mode_options[x], key='mode')
                     
                     if selected_mode == 'WEIGHT':
@@ -345,21 +412,22 @@ with col_main:
         # === Tab 2: 지표 ===
         with tab2:
             st.write("### 투자 심리 & 지표")
-            # RSI
-            delta = hist_chart['Close'].diff()
-            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-            rs = gain / loss
-            rsi = 100 - (100 / (1 + rs)).iloc[-1]
-            
-            col_i1, col_i2 = st.columns(2)
-            col_i1.metric("RSI (14)", f"{rsi:.2f}")
-            msg = "🟢 과매도 (매수 기회?)" if rsi < 30 else "🔴 과매수 (과열 주의)" if rsi > 70 else "⚪ 중립"
-            col_i1.info(msg)
+            if len(hist_chart) > 15:
+                delta = hist_chart['Close'].diff()
+                gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+                loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                rs = gain / loss
+                rsi = 100 - (100 / (1 + rs)).iloc[-1]
+                
+                col_i1, col_i2 = st.columns(2)
+                col_i1.metric("RSI (14)", f"{rsi:.2f}")
+                msg = "🟢 과매도 (매수 기회?)" if rsi < 30 else "🔴 과매수 (과열 주의)" if rsi > 70 else "⚪ 중립"
+                col_i1.info(msg)
+            else:
+                st.warning("데이터가 부족하여 지표를 계산할 수 없습니다.")
 
         # === Tab 3: 예측 ===
         with tab3:
             st.write("### 통계적 변동성 예측")
             daily_vol = hist_chart['Close'].pct_change().std()
             st.info(f"내일 예상 변동폭: ±${last_price * daily_vol:.2f} ({daily_vol*100:.2f}%)")
-            st.caption("* 과거 변동성을 기반으로 한 통계적 추정입니다.")
