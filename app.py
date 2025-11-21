@@ -5,6 +5,83 @@ import plotly.graph_objects as go
 import sqlite3
 import math
 
+# --- [백테스팅 엔진] ---
+def run_backtest(df, initial_cash, trigger_up, sell_pct, trigger_down, buy_pct):
+    """
+    df: 데이터프레임 (Close 컬럼 필수)
+    initial_cash: 초기 자본금 (USD)
+    trigger_up: 익절 기준 (예: 10 -> 10% 상승시)
+    sell_pct: 익절 물량 (예: 50 -> 보유량의 50% 매도)
+    trigger_down: 추매 기준 (예: 10 -> 10% 하락시)
+    buy_pct: 추매 물량 (예: 50 -> 현금의 50% 투입)
+    """
+    cash = initial_cash
+    shares = 0
+    avg_price = 0
+    
+    # 기록용 리스트
+    history = [] 
+    trade_log = [] # 매매 일지
+
+    # 첫 날 종가로 50% 매수하고 시작한다고 가정 (혹은 100% 현금 시작 등 설정 가능)
+    # 여기서는 시뮬레이션의 명확성을 위해 '100% 현금 시작 -> 첫 매수 기회를 기다림' 
+    # 또는 '첫날 50:50 진입' 중 선택해야 하는데, 보통 리밸런싱은 보유 상태를 가정하므로
+    # 첫날 자산의 50%를 시가에 매수한 것으로 세팅합니다.
+    start_price = df.iloc[0]['Close']
+    shares = math.floor((cash * 0.5) / start_price)
+    cash -= shares * start_price
+    avg_price = start_price
+    
+    for date, row in df.iterrows():
+        price = row['Close']
+        action = None
+        trade_amt = 0
+        
+        # 1. 매도 조건 (익절) check
+        # 평단가 대비 trigger_up% 이상 올랐는가?
+        if shares > 0 and price >= avg_price * (1 + trigger_up/100):
+            # 보유 수량의 sell_pct% 만큼 매도 (소수점 버림)
+            sell_qty = math.floor(shares * (sell_pct / 100))
+            if sell_qty > 0:
+                shares -= sell_qty
+                cash += sell_qty * price
+                action = "SELL"
+                trade_amt = sell_qty
+                # 매도시 평단가는 변하지 않음 (FIFO 기준이 아니면)
+                trade_log.append({"date": date, "type": "🔴 매도", "price": price, "qty": sell_qty, "profit": (price - avg_price)/avg_price*100})
+
+        # 2. 매수 조건 (추매) check
+        # 평단가(없으면 전날 종가 기준) 대비 trigger_down% 이하로 떨어졌는가?
+        # 주식을 다 팔아서 shares가 0일 때는 직전 고점 대비 등을 따져야 하나, 
+        # 여기서는 단순화하여 '직전 체결 평단가' 혹은 '보유 없으면 진입' 로직 적용 필요.
+        # 편의상 shares가 0이면 무조건 진입하도록 설정하거나, 기준점을 잡아야 함.
+        elif price <= avg_price * (1 - trigger_down/100) or (shares == 0 and cash > price):
+            # 보유 현금의 buy_pct% 만큼 매수
+            invest_amt = cash * (buy_pct / 100)
+            buy_qty = math.floor(invest_amt / price)
+            
+            if buy_qty > 0:
+                # 평단가 갱신 (이동평균법)
+                total_val = (shares * avg_price) + (buy_qty * price)
+                shares += buy_qty
+                cash -= buy_qty * price
+                avg_price = total_val / shares
+                action = "BUY"
+                trade_amt = buy_qty
+                trade_log.append({"date": date, "type": "🔵 매수", "price": price, "qty": buy_qty, "new_avg": avg_price})
+
+        # 일별 자산 가치 기록
+        total_asset = cash + (shares * price)
+        history.append(total_asset)
+
+    df['Strategy_Asset'] = history
+    
+    # 결과 계산
+    final_return = ((history[-1] - initial_cash) / initial_cash) * 100
+    buy_hold_return = ((df.iloc[-1]['Close'] - df.iloc[0]['Close']) / df.iloc[0]['Close']) * 100
+    
+    return df, trade_log, final_return, buy_hold_return
+
 # 1. 페이지 설정 (Wide 모드)
 st.set_page_config(page_title="My Quant Portfolio", layout="wide")
 
@@ -41,7 +118,7 @@ init_db()
 # 3. 사이드바가 아닌 메인 화면 분할 (3:1 비율)
 col_main, col_side = st.columns([3, 1])
 
-# --- [우측 패널] 내 투자 현황 (토스증권 우측 UI 모방) ---
+# --- [우측 패널] 내 투자 현황 ---
 with col_side:
     st.subheader("내 투자")
     
@@ -118,13 +195,89 @@ with col_main:
     tab1, tab2, tab3 = st.tabs(["🔄 리밸런싱", "📢 매매 추천", "📈 추세 예측"])
     
     with tab1:
-        st.write("### 리밸런싱 시뮬레이터")
-        col_r1, col_r2 = st.columns(2)
-        target_ratio = col_r1.slider("목표 주식 비중 (%)", 0, 100, 50)
-        rebal_cond = col_r2.number_input("리밸런싱 트리거 (±%)", value=5.0)
+        st.markdown("### 🛠️ 리밸런싱 & 변동성 수확 시뮬레이터")
+        st.caption("과거 데이터를 바탕으로 '규칙 기반 매매'를 했을 때의 결과를 시뮬레이션합니다.")
         
-        st.info(f"💡 {search_ticker} 비중이 {target_ratio}%에서 ±{rebal_cond}% 벗어나면 알림을 줍니다.")
-        # 여기에 구체적인 온주 단위 계산 로직 추가 예정
+        col_inputs, col_results = st.columns([1, 2])
+        
+        with col_inputs:
+            st.markdown("#### ⚙️ 규칙 설정")
+            with st.container(border=True):
+                st.markdown("**1. 익절(Sell) 규칙**")
+                # A% 오르면
+                in_up_A = st.slider("A: 상승 트리거 (%)", 1.0, 50.0, 10.0, step=0.5, key='up_a')
+                # B% 매도
+                in_sell_B = st.slider("B: 매도 비중 (%)", 10, 100, 50, step=10, key='sell_b')
+                
+                st.divider()
+                
+                st.markdown("**2. 추매(Buy) 규칙**")
+                # C% 내리면
+                in_down_C = st.slider("C: 하락 트리거 (%)", 1.0, 50.0, 10.0, step=0.5, key='down_c')
+                # D% 매수
+                in_buy_D = st.slider("D: 현금 투입 비중 (%)", 10, 100, 50, step=10, key='buy_d')
+
+            st.info(f"""
+            📝 **요약**: 
+            평단가보다 **{in_up_A}%** 오르면 보유량의 **{in_sell_B}%**를 팝니다.
+            평단가보다 **{in_down_C}%** 내리면 현금의 **{in_buy_D}%**로 줍줍합니다.
+            """)
+            
+            # 최적 파라미터 찾기 버튼 (단순화 버전)
+            if st.button("✨ 최적 파라미터 찾기 (Beta)"):
+                st.toast("계산 중입니다... 잠시만 기다려주세요.")
+                # 간단한 그리드 서치 로직이 여기에 들어갈 수 있습니다.
+                # 현재는 UI 데모를 위해 메시지만 띄웁니다.
+
+        with col_results:
+            # 시뮬레이션 실행
+            # 데이터 기간 확장 (백테스팅을 위해 1년치 로드)
+            hist_1y = stock.history(period="1y")
+            
+            if len(hist_1y) > 0:
+                # 초기 자본금 $10,000 가정
+                df_res, logs, final_ret, bh_ret = run_backtest(
+                    hist_1y.copy(), 10000, in_up_A, in_sell_B, in_down_C, in_buy_D
+                )
+                
+                # 1. 수익률 비교 지표
+                m1, m2, m3 = st.columns(3)
+                m1.metric("내 전략 수익률", f"{final_ret:.2f}%", delta=f"{final_ret - bh_ret:.2f}%p (vs존버)")
+                m2.metric("단순 보유(존버) 수익률", f"{bh_ret:.2f}%")
+                m3.metric("매매 횟수", f"{len(logs)}회")
+                
+                # 2. 그래프 그리기 (Plotly)
+                fig_back = go.Figure()
+                # 전략 자산 추이
+                fig_back.add_trace(go.Scatter(x=df_res.index, y=df_res['Strategy_Asset'], 
+                                    mode='lines', name='내 전략 자산', line=dict(color='firebrick', width=2)))
+                # 단순 보유 자산 추이 (비교용: 초기자금 $10,000 기준 환산)
+                norm_factor = 10000 / df_res['Close'].iloc[0]
+                fig_back.add_trace(go.Scatter(x=df_res.index, y=df_res['Close']*norm_factor, 
+                                    mode='lines', name='단순 보유(Buy&Hold)', line=dict(color='lightgray', dash='dot')))
+                
+                # 매수/매도 타점 표시
+                buy_dates = [x['date'] for x in logs if '매수' in x['type']]
+                buy_prices = [df_res.loc[d]['Strategy_Asset'] for d in buy_dates]
+                sell_dates = [x['date'] for x in logs if '매도' in x['type']]
+                sell_prices = [df_res.loc[d]['Strategy_Asset'] for d in sell_dates]
+
+                fig_back.add_trace(go.Scatter(x=buy_dates, y=buy_prices, mode='markers', 
+                                              name='매수 체결', marker=dict(color='blue', symbol='triangle-up', size=10)))
+                fig_back.add_trace(go.Scatter(x=sell_dates, y=sell_prices, mode='markers', 
+                                              name='매도 체결', marker=dict(color='red', symbol='triangle-down', size=10)))
+
+                fig_back.update_layout(title="자산 증감 추이 (1년)", xaxis_title="날짜", yaxis_title="총 자산 가치 ($)", hovermode="x unified")
+                st.plotly_chart(fig_back, use_container_width=True)
+                
+                # 3. 매매 로그 (접기 기능)
+                with st.expander("📋 상세 매매 기록 보기"):
+                    if len(logs) > 0:
+                        log_df = pd.DataFrame(logs)
+                        log_df['date'] = log_df['date'].dt.strftime('%Y-%m-%d')
+                        st.dataframe(log_df, use_container_width=True)
+                    else:
+                        st.write("설정된 기간 동안 체결된 매매가 없습니다.")
         
     with tab2:
         st.write("### 퀀트 기반 매매 신호")
