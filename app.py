@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 # ---------------------------------------------------------
 # 1. 페이지 설정 및 초기화
 # ---------------------------------------------------------
-st.set_page_config(page_title="Quant Portfolio", layout="wide")
+st.set_page_config(page_title="My Quant Portfolio", layout="wide")
 
 if 'search_ticker' not in st.session_state:
     st.session_state['search_ticker'] = 'TQQQ'
@@ -18,17 +18,14 @@ def init_db():
     conn = sqlite3.connect('portfolio.db')
     c = conn.cursor()
     
-    # 테이블 생성
     c.execute('''CREATE TABLE IF NOT EXISTS holdings
                  (ticker TEXT PRIMARY KEY, shares INTEGER, avg_price REAL)''')
     c.execute('''CREATE TABLE IF NOT EXISTS cash
                  (currency TEXT PRIMARY KEY, amount REAL)''')
     
-    # [업데이트] 순서 변경을 위한 sort_order 컬럼 추가 (기존 DB 마이그레이션)
     try:
         c.execute("SELECT sort_order FROM holdings LIMIT 1")
     except sqlite3.OperationalError:
-        # 컬럼이 없으면 추가
         c.execute("ALTER TABLE holdings ADD COLUMN sort_order INTEGER DEFAULT 99")
         
     conn.commit()
@@ -37,7 +34,6 @@ def init_db():
 def get_portfolio():
     conn = sqlite3.connect('portfolio.db')
     try:
-        # [업데이트] sort_order 기준으로 정렬해서 가져오기
         df_holdings = pd.read_sql("SELECT * FROM holdings ORDER BY sort_order ASC, ticker ASC", conn)
         df_cash = pd.read_sql("SELECT * FROM cash", conn)
     except:
@@ -52,7 +48,6 @@ def update_holding(ticker, shares, avg_price):
     if shares == 0:
         c.execute("DELETE FROM holdings WHERE ticker=?", (ticker,))
     else:
-        # 기존 sort_order 유지하면서 업데이트 (없으면 99)
         c.execute("SELECT sort_order FROM holdings WHERE ticker=?", (ticker,))
         res = c.fetchone()
         order = res[0] if res else 99
@@ -67,7 +62,6 @@ def update_cash(amount):
     conn.commit()
     conn.close()
 
-# [신규 기능] 순서 일괄 업데이트
 def update_sort_orders(df_edited):
     conn = sqlite3.connect('portfolio.db')
     c = conn.cursor()
@@ -80,6 +74,44 @@ def set_ticker(ticker):
     st.session_state['search_ticker'] = ticker
 
 init_db()
+
+# ---------------------------------------------------------
+# [신규 기능] 글로벌 마켓 대시보드 (최상단 표시)
+# ---------------------------------------------------------
+def display_global_dashboard():
+    # 나스닥100선물(NQ=F), 원달러(KRW=X), VIX(^VIX)
+    tickers = {'NQ=F': '나스닥 100 선물', 'KRW=X': '원/달러 환율', '^VIX': 'VIX 지수 (공포)'}
+    
+    # 3단 컬럼 생성
+    cols = st.columns(3)
+    
+    # 데이터 로드 및 표시
+    for i, (ticker, name) in enumerate(tickers.items()):
+        with cols[i]:
+            try:
+                # 최근 5일치 데이터를 가져옴 (주말/휴일 고려)
+                data = yf.Ticker(ticker).history(period="5d")
+                if len(data) >= 2:
+                    curr = data['Close'].iloc[-1]
+                    prev = data['Close'].iloc[-2]
+                    delta = curr - prev
+                    pct = (delta / prev) * 100
+                    
+                    # 포맷팅
+                    val_str = f"{curr:,.2f}"
+                    if ticker == 'KRW=X': val_str = f"{curr:,.0f}원"
+                    
+                    st.metric(label=name, value=val_str, delta=f"{delta:.2f} ({pct:.2f}%)")
+                else:
+                    st.metric(label=name, value="-", delta="-")
+            except:
+                st.metric(label=name, value="Error", delta=None)
+    
+    st.divider() # 구분선
+
+# 앱 시작 시 바로 실행
+display_global_dashboard()
+
 
 # ---------------------------------------------------------
 # 2. 핵심 로직 함수들
@@ -213,7 +245,6 @@ with col_side:
     total_value = current_cash
     daily_pnl = 0.0
     
-    # 보유 종목 목록
     if not my_stocks.empty:
         for index, row in my_stocks.iterrows():
             ticker = row['ticker']
@@ -264,7 +295,6 @@ with col_side:
 
     st.divider()
     
-    # 탭: 현금 / 주식 / 순서변경
     tab_edit1, tab_edit2, tab_edit3 = st.tabs(["💵 현금", "✏️ 주식", "≡ 순서"])
     
     with tab_edit1:
@@ -281,11 +311,9 @@ with col_side:
             update_holding(input_ticker, input_shares, input_avg)
             st.rerun()
     
-    # [신규 기능] 종목 순서 변경
     with tab_edit3:
         if not my_stocks.empty:
             st.caption("숫자가 작을수록 위로 올라갑니다.")
-            # 데이터 프레임 에디터로 순서 편집
             edited_df = st.data_editor(
                 my_stocks[['ticker', 'sort_order']], 
                 column_config={
@@ -334,11 +362,10 @@ with col_main:
         
         st.markdown(f"## {search_ticker} ${last_price:.2f} <span style='color:{'red' if change>0 else 'blue'}'>({pct_change:.2f}%)</span>", unsafe_allow_html=True)
 
-        # [신규 기능] 차트 구간 선택기 (분봉일 때만 표시)
+        # 차트 구간 선택기 (분봉일 때만)
         zoom_range = None
         if sel_interval in ['1m', '5m']:
-            # 가로 탭 형태로 표시
-            range_cols = st.columns([1, 1, 1, 1, 6]) # 버튼 4개 + 여백
+            range_cols = st.columns([1, 1, 1, 1, 6]) 
             with range_cols[0]: 
                 if st.button("1H", use_container_width=True): zoom_range = 1
             with range_cols[1]: 
@@ -346,32 +373,27 @@ with col_main:
             with range_cols[2]: 
                 if st.button("4H", use_container_width=True): zoom_range = 4
             with range_cols[3]: 
-                if st.button("ALL", use_container_width=True): zoom_range = 0 # 전체
+                if st.button("ALL", use_container_width=True): zoom_range = 0 
             
-            # Session State에 줌 상태 저장 (버튼 클릭 유지 효과)
-            if 'chart_zoom' not in st.session_state: st.session_state['chart_zoom'] = 4 # 기본 4시간
+            if 'chart_zoom' not in st.session_state: st.session_state['chart_zoom'] = 4 
             
             if zoom_range is not None:
                 st.session_state['chart_zoom'] = zoom_range
             
             current_zoom = st.session_state['chart_zoom']
 
-        # 차트 생성
         fig = go.Figure(data=[go.Candlestick(x=hist_chart.index,
                     open=hist_chart['Open'], high=hist_chart['High'],
                     low=hist_chart['Low'], close=hist_chart['Close'])])
         
-        # [기능 구현] x축 범위(Range) 동적 설정
         if sel_interval in ['1m', '5m'] and st.session_state.get('chart_zoom', 0) > 0:
             end_time = hist_chart.index[-1]
             start_time = end_time - timedelta(hours=st.session_state['chart_zoom'])
             fig.update_xaxes(range=[start_time, end_time])
         
-        # RangeSlider 제거 및 여백 최소화
         fig.update_layout(xaxis_rangeslider_visible=False, height=400, margin=dict(l=0, r=0, t=10, b=0))
         st.plotly_chart(fig, use_container_width=True)
 
-        # 탭 구성
         tab1, tab2, tab3 = st.tabs(["🔄 전략 시뮬레이터", "📢 매매 신호", "📈 추세 예측"])
         
         # === Tab 1: 리밸런싱 ===
