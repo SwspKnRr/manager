@@ -20,12 +20,10 @@ def get_db_connection():
 def init_db():
     conn = get_db_connection()
     c = conn.cursor()
-    # [수정] shares INTEGER -> REAL (소수점 지원)
     c.execute('''CREATE TABLE IF NOT EXISTS holdings
                  (ticker TEXT PRIMARY KEY, shares REAL, avg_price REAL, sort_order INTEGER)''')
     c.execute('''CREATE TABLE IF NOT EXISTS cash
                  (currency TEXT PRIMARY KEY, amount REAL)''')
-    # [수정] shares INTEGER -> REAL
     c.execute('''CREATE TABLE IF NOT EXISTS trade_logs
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   date TEXT, ticker TEXT, action TEXT, shares REAL, price REAL, note TEXT, realized_pnl REAL)''')
@@ -132,7 +130,6 @@ def sell_stock(ticker, sell_shares, sell_price):
     
     if row:
         old_shares, old_avg = row
-        # 소수점 오차 고려하여 비교 (약간의 여유)
         if sell_shares > old_shares + 0.000001:
             st.error(f"❌ 매도 불가: 보유 수량({old_shares}주)보다 많이 팔 수 없습니다.")
             conn.close(); return
@@ -145,7 +142,6 @@ def sell_stock(ticker, sell_shares, sell_price):
         new_shares = old_shares - sell_shares
         realized_pnl = (sell_price - old_avg) * sell_shares 
         
-        # 소수점 잔고가 거의 0이면 삭제
         if new_shares < 0.000001:
             c.execute("DELETE FROM holdings WHERE ticker=?", (ticker,))
             conn.commit(); conn.close()
@@ -216,13 +212,12 @@ def display_global_dashboard():
 display_global_dashboard()
 
 # ---------------------------------------------------------
-# 2. 핵심 로직 (백테스팅) - 소수점 매매 지원 수정
+# 2. 핵심 로직 (백테스팅)
 # ---------------------------------------------------------
 def run_backtest(df, initial_cash, mode, target_weight, trigger_up, sell_pct, trigger_down, buy_pct):
     cash = initial_cash
     start_price = df.iloc[0]['Close']
     initial_invest = (initial_cash * (target_weight / 100))
-    # [수정] 소수점 매매 허용 (floor 제거)
     shares = initial_invest / start_price 
     cash -= shares * start_price
     last_rebal_price = start_price 
@@ -238,7 +233,6 @@ def run_backtest(df, initial_cash, mode, target_weight, trigger_up, sell_pct, tr
         elif mode == 'WEIGHT': 
             if current_weight >= target_weight + trigger_up: should_sell = True
         if should_sell:
-            # [수정] 소수점 매도
             sell_qty = shares * (sell_pct / 100) 
             if sell_qty > 0:
                 shares -= sell_qty; cash += sell_qty * price
@@ -253,7 +247,6 @@ def run_backtest(df, initial_cash, mode, target_weight, trigger_up, sell_pct, tr
                 if current_weight <= target_weight - trigger_down: should_buy = True
             if should_buy:
                 invest_amt = cash * (buy_pct / 100)
-                # [수정] 소수점 매수
                 buy_qty = invest_amt / price 
                 if buy_qty > 0:
                     shares += buy_qty; cash -= buy_qty * price
@@ -288,39 +281,70 @@ col_main, col_side = st.columns([3, 1])
 
 # --- [우측 패널] ---
 with col_side:
-    st.subheader("내 투자")
     my_stocks, my_cash = get_portfolio()
     current_cash = my_cash.iloc[0]['amount'] if not my_cash.empty else 0.0
     
-    # 자산 계산
-    total_stock_val = 0.0
-    daily_pnl = 0.0
+    # 자산 계산 및 화면용 데이터 준비
+    stock_display_list = []
+    total_invested = 0.0 # 총 매수 금액
+    total_stock_val = 0.0 # 총 평가 금액
+    daily_pnl_sum = 0.0 # 오늘 총 손익
     
     if not my_stocks.empty:
         for index, row in my_stocks.iterrows():
-            ticker = row['ticker']; shares = row['shares']
+            ticker = row['ticker']; shares = row['shares']; avg_price = row['avg_price']
             try:
                 stock_data = yf.Ticker(ticker).history(period="5d")
                 if len(stock_data) >= 2:
-                    cur_price = stock_data['Close'].iloc[-1]; prev_close = stock_data['Close'].iloc[-2]
+                    cur_price = stock_data['Close'].iloc[-1]
+                    prev_close = stock_data['Close'].iloc[-2]
+                    
                     val = cur_price * shares
+                    invested = avg_price * shares
+                    
                     total_stock_val += val
-                    daily_pnl += (cur_price - prev_close) * shares
-                    with st.container(border=True):
-                        c1, c2 = st.columns([1.2, 1])
-                        if c1.button(f"{ticker}", key=f"btn_{ticker}", use_container_width=True, on_click=set_ticker, args=(ticker,)): pass
-                        # [수정] 소수점 수량 표시
-                        c1.caption(f"{shares:g}주") 
-                        profit_pct = (cur_price - row['avg_price']) / row['avg_price'] * 100
-                        color = "red" if profit_pct > 0 else "blue"
-                        c2.markdown(f"${val:,.0f}")
-                        c2.markdown(f":{color}[{profit_pct:.1f}%]")
+                    total_invested += invested
+                    daily_pnl_sum += (cur_price - prev_close) * shares
+                    
+                    profit_pct = (cur_price - avg_price) / avg_price * 100 if avg_price > 0 else 0.0
+                    
+                    stock_display_list.append({
+                        'ticker': ticker, 'shares': shares, 'val': val, 
+                        'profit_pct': profit_pct, 'cur_price': cur_price
+                    })
             except: pass
+
+    # [신규] 내 투자 옆에 총 손익 표시
+    # 총 손익 계산
+    total_pnl_val = total_stock_val - total_invested
+    total_pnl_pct = (total_pnl_val / total_invested * 100) if total_invested > 0 else 0.0
+    
+    # 색상 포맷팅
+    pnl_color = "red" if total_pnl_val >= 0 else "blue"
+    pnl_icon = "🔺" if total_pnl_val >= 0 else "▼"
+    
+    # 헤더에 HTML로 표시
+    st.markdown(f"""
+        <h3 style='display:inline;'>내 투자</h3>
+        <span style='color:{pnl_color}; font-size:1rem; margin-left:10px;'>
+            {pnl_icon} {total_pnl_pct:.2f}% (${total_pnl_val:,.2f})
+        </span>
+    """, unsafe_allow_html=True)
+    
+    # 종목 리스트 렌더링
+    for item in stock_display_list:
+        with st.container(border=True):
+            c1, c2 = st.columns([1.2, 1])
+            if c1.button(f"{item['ticker']}", key=f"btn_{item['ticker']}", use_container_width=True, on_click=set_ticker, args=(item['ticker'],)): pass
+            c1.caption(f"{item['shares']:g}주")
+            
+            color = "red" if item['profit_pct'] > 0 else "blue"
+            c2.markdown(f"${item['val']:,.0f}")
+            c2.markdown(f":{color}[{item['profit_pct']:.1f}%]")
 
     total_value = total_stock_val + current_cash
 
-    # [신규] 자산 구성 내역 표시
-    st.metric(label="총 자산 (USD)", value=f"${total_value:,.2f}", delta=f"${daily_pnl:,.2f} (오늘)")
+    st.metric(label="총 자산 (USD)", value=f"${total_value:,.2f}", delta=f"${daily_pnl_sum:,.2f} (오늘)")
     st.caption(f"📊 주식 ${total_stock_val:,.2f} + 💵 현금 ${current_cash:,.2f}")
     
     if st.button("📈 자산 추이 (Simulation)", use_container_width=True):
@@ -350,7 +374,6 @@ with col_side:
         st.caption("티커 입력 후 매수/매도 선택")
         input_ticker = st.text_input("티커 (예: TQQQ)").upper()
         c_sh, c_pr = st.columns(2)
-        # [수정] 소수점 입력 가능하도록 step 변경
         input_shares = c_sh.number_input("수량", min_value=0.000001, step=0.01, format="%.6f")
         input_avg = c_pr.number_input("단가 ($)", min_value=0.0)
         is_overwrite = st.checkbox("단순 정보 수정 (덮어쓰기)")
