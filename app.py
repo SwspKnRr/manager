@@ -254,28 +254,58 @@ with tab2:
     st.dataframe(sdf, use_container_width=True, hide_index=True)
 
 with tab3:
-    ticker = st.selectbox("예측 종목", tickers)
-    if st.button("예측 시작"):
-        with st.spinner("학습 중..."):
-            raw = yf.download(ticker, period="5y", progress=False)
-            train = pd.DataFrame({"ds": raw.index, "y": raw["Close"].values})
-            m = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False)
-            m.fit(train)
-            future = m.make_future_dataframe(30)
-            forecast = m.predict(future)
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=train["ds"], y=train["y"], name="실제"))
-            fig.add_trace(go.Scatter(x=forecast["ds"], y=forecast["yhat"], name="예측", line=dict(color="#e62e2e")))
-            fig.add_trace(go.Scatter(x=forecast["ds"], y=forecast["yhat_upper"], line=dict(width=0), showlegend=False))
-            fig.add_trace(go.Scatter(x=forecast["ds"], y=forecast["yhat_lower"], line=dict(width=0), fill="tonexty", fillcolor="rgba(100,150,255,0.2)", name="구간"))
-            st.plotly_chart(fig, use_container_width=True)
-            curr = raw["Close"].iloc[-1]
-            tmr = forecast[forecast["ds"] > train["ds"].iloc[-1]].iloc[0]["yhat"]
-            w7 = forecast.iloc[-24]["yhat"]
-            m30 = forecast.iloc[-1]["yhat"]
-            st.metric("현재", f"${curr:.2f}")
-            st.metric("내일 예상", f"${tmr:.2f}", f"{(tmr/curr-1)*100:+.2f}%")
-            st.metric("+7일", f"${w7:.2f}", f"{(w7/curr-1)*100:+.2f}%")
-            st.metric("+30일", f"${m30:.2f}", f"{(m30/curr-1)*100:+.2f}%", delta_color="normal")
+    st.markdown("#### 🔮 가격 예측 (Prophet 기반, 내일 ~ 30일 후)")
+    ticker = st.selectbox("예측할 종목 선택", tickers, key="pred_ticker")
 
-st.caption("2025.11.22 — ")
+    if st.button("🚀 예측 실행", key="run_prophet"):
+        with st.spinner(f"{ticker} 5년 데이터 불러와서 예측 중... (10~20초 소요)"):
+            try:
+                raw = yf.download(ticker, period="5y", progress=False, auto_adjust=True)
+                if raw.empty or 'Close' not in raw.columns:
+                    st.error("데이터를 불러올 수 없습니다. 티커 확인해주세요.")
+                    st.stop()
+
+                # 여기만 고쳤음! → index를 reset 해서 일반 list로 변환
+                df = raw['Close'].reset_index()
+                train_df = pd.DataFrame({
+                    'ds': pd.to_datetime(df['Date']),    # 명확히 datetime 변환
+                    'y': df['Close'].astype(float).values
+                })
+
+                m = Prophet(
+                    yearly_seasonality=True,
+                    weekly_seasonality=True,
+                    daily_seasonality=False,
+                    seasonality_mode='multiplicative'
+                )
+                m.fit(train_df)
+
+                future = m.make_future_dataframe(periods=30)
+                forecast = m.predict(future)
+
+                # 차트
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=train_df['ds'], y=train_df['y'], name="실제 가격", line=dict(color="#1f77b4")))
+                fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat'], name="예측 가격", line=dict(color="#e62e2e", width=3)))
+                fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat_upper'], line=dict(width=0), showlegend=False))
+                fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat_lower'], fill='tonexty', fillcolor="rgba(100,150,255,0.2)", line=dict(width=0), name="80% 신뢰구간"))
+                fig.update_layout(height=500, title=f"{ticker} 가격 예측 (Prophet)", hovermode="x unified")
+                st.plotly_chart(fig, use_container_width=True)
+
+                # 현재가 및 예측값
+                curr = float(raw['Close'].iloc[-1])
+                tomorrow = forecast[forecast['ds'] > train_df['ds'].max()].iloc[0]['yhat']
+                week_later = forecast.iloc[-24]['yhat']
+                month_later = forecast.iloc[-1]['yhat']
+
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("현재가", f"${curr:.2f}")
+                c2.metric("내일 예상", f"${tomorrow:.2f}", f"{(tomorrow/curr-1)*100:+.2f}%")
+                c3.metric("+7일 예상", f"${week_later:.2f}", f"{(week_later/curr-1)*100:+.2f}%")
+                c4.metric("+30일 예상", f"${month_later:.2f}", f"{(month_later/curr-1)*100:+.2f}%")
+
+                st.success(f"{ticker} 예측 완료!")
+                st.balloons()
+
+            except Exception as e:
+                st.error(f"예측 중 오류 발생: {str(e)}")
