@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 import sqlite3
 import math
 from datetime import datetime, timedelta
+import io
 
 # ---------------------------------------------------------
 # 1. 페이지 설정 및 초기화
@@ -89,6 +90,53 @@ def get_current_cash(conn):
     c.execute("SELECT amount FROM cash WHERE currency='USD'")
     row = c.fetchone()
     return row[0] if row else 0.0
+
+# [신규] 데이터 백업 (CSV 다운로드)
+def convert_df_to_csv():
+    conn = get_db_connection()
+    holdings = pd.read_sql("SELECT * FROM holdings", conn)
+    cash = pd.read_sql("SELECT * FROM cash", conn)
+    conn.close()
+    
+    # 두 테이블을 하나의 CSV로 합치기 위해 식별자 추가
+    holdings['type'] = 'stock'
+    cash['type'] = 'cash'
+    
+    # 컬럼 통일 (cash 테이블엔 ticker, shares 등이 없으므로 조정)
+    cash = cash.rename(columns={'currency': 'ticker', 'amount': 'avg_price'}) # amount를 잠시 avg_price 컬럼에 태움
+    cash['shares'] = 0
+    cash['sort_order'] = 0
+    
+    merged = pd.concat([holdings, cash], ignore_index=True)
+    return merged.to_csv(index=False).encode('utf-8')
+
+# [신규] 데이터 복구 (CSV 업로드)
+def restore_from_csv(uploaded_file):
+    try:
+        df = pd.read_csv(uploaded_file)
+        conn = get_db_connection()
+        c = conn.cursor()
+        
+        # 기존 데이터 초기화
+        c.execute("DELETE FROM holdings")
+        c.execute("DELETE FROM cash")
+        
+        # 데이터 복원
+        for _, row in df.iterrows():
+            if row['type'] == 'stock':
+                c.execute("INSERT INTO holdings (ticker, shares, avg_price, sort_order) VALUES (?, ?, ?, ?)",
+                          (row['ticker'], row['shares'], row['avg_price'], row['sort_order']))
+            elif row['type'] == 'cash':
+                # 위에서 avg_price에 태웠던 amount 복구
+                c.execute("INSERT INTO cash (currency, amount) VALUES (?, ?)", 
+                          (row['ticker'], row['avg_price']))
+        
+        conn.commit()
+        conn.close()
+        st.success("✅ 데이터 복구 성공! (새로고침 됩니다)")
+        st.rerun()
+    except Exception as e:
+        st.error(f"복구 실패: {e}")
 
 # [매수 Logic]
 def add_stock(ticker, new_shares, new_price):
@@ -284,11 +332,8 @@ with col_side:
     my_stocks, my_cash = get_portfolio()
     current_cash = my_cash.iloc[0]['amount'] if not my_cash.empty else 0.0
     
-    # 자산 계산 및 화면용 데이터 준비
+    total_stock_val = 0.0; daily_pnl_sum = 0.0; total_invested = 0.0
     stock_display_list = []
-    total_invested = 0.0 # 총 매수 금액
-    total_stock_val = 0.0 # 총 평가 금액
-    daily_pnl_sum = 0.0 # 오늘 총 손익
     
     if not my_stocks.empty:
         for index, row in my_stocks.iterrows():
@@ -296,54 +341,33 @@ with col_side:
             try:
                 stock_data = yf.Ticker(ticker).history(period="5d")
                 if len(stock_data) >= 2:
-                    cur_price = stock_data['Close'].iloc[-1]
-                    prev_close = stock_data['Close'].iloc[-2]
-                    
+                    cur_price = stock_data['Close'].iloc[-1]; prev_close = stock_data['Close'].iloc[-2]
                     val = cur_price * shares
                     invested = avg_price * shares
-                    
-                    total_stock_val += val
-                    total_invested += invested
+                    total_stock_val += val; total_invested += invested
                     daily_pnl_sum += (cur_price - prev_close) * shares
-                    
                     profit_pct = (cur_price - avg_price) / avg_price * 100 if avg_price > 0 else 0.0
-                    
-                    stock_display_list.append({
-                        'ticker': ticker, 'shares': shares, 'val': val, 
-                        'profit_pct': profit_pct, 'cur_price': cur_price
-                    })
+                    stock_display_list.append({'ticker': ticker, 'shares': shares, 'val': val, 'profit_pct': profit_pct})
             except: pass
 
-    # [신규] 내 투자 옆에 총 손익 표시
     # 총 손익 계산
     total_pnl_val = total_stock_val - total_invested
     total_pnl_pct = (total_pnl_val / total_invested * 100) if total_invested > 0 else 0.0
-    
-    # 색상 포맷팅
     pnl_color = "red" if total_pnl_val >= 0 else "blue"
     pnl_icon = "🔺" if total_pnl_val >= 0 else "▼"
     
-    # 헤더에 HTML로 표시
-    st.markdown(f"""
-        <h3 style='display:inline;'>내 투자</h3>
-        <span style='color:{pnl_color}; font-size:1rem; margin-left:10px;'>
-            {pnl_icon} {total_pnl_pct:.2f}% (${total_pnl_val:,.2f})
-        </span>
-    """, unsafe_allow_html=True)
+    st.markdown(f"<h3 style='display:inline;'>내 투자</h3><span style='color:{pnl_color}; font-size:1rem; margin-left:10px;'>{pnl_icon} {total_pnl_pct:.2f}% (${total_pnl_val:,.2f})</span>", unsafe_allow_html=True)
     
-    # 종목 리스트 렌더링
     for item in stock_display_list:
         with st.container(border=True):
             c1, c2 = st.columns([1.2, 1])
             if c1.button(f"{item['ticker']}", key=f"btn_{item['ticker']}", use_container_width=True, on_click=set_ticker, args=(item['ticker'],)): pass
             c1.caption(f"{item['shares']:g}주")
-            
             color = "red" if item['profit_pct'] > 0 else "blue"
             c2.markdown(f"${item['val']:,.0f}")
             c2.markdown(f":{color}[{item['profit_pct']:.1f}%]")
 
     total_value = total_stock_val + current_cash
-
     st.metric(label="총 자산 (USD)", value=f"${total_value:,.2f}", delta=f"${daily_pnl_sum:,.2f} (오늘)")
     st.caption(f"📊 주식 ${total_stock_val:,.2f} + 💵 현금 ${current_cash:,.2f}")
     
@@ -390,9 +414,29 @@ with col_side:
                 else: sell_stock(input_ticker, input_shares, input_avg); st.rerun()
             else: st.toast("티커 입력 필요")
 
+    # [신규] 백업/복구 기능이 추가된 관리 탭
     with tab_edit3:
+        st.write("**데이터 백업/복구**")
+        col_b1, col_b2 = st.columns(2)
+        with col_b1:
+            csv_data = convert_df_to_csv()
+            st.download_button(
+                label="💾 백업 (다운로드)",
+                data=csv_data,
+                file_name="portfolio_backup.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+        with col_b2:
+            uploaded_file = st.file_uploader("📂 복구 (업로드)", type=['csv'], label_visibility="collapsed")
+            if uploaded_file is not None:
+                if st.button("복구 시작", type="primary", use_container_width=True):
+                    restore_from_csv(uploaded_file)
+
+        st.divider()
+        
         if not my_stocks.empty:
-            st.caption("순서 변경 및 삭제")
+            st.write("**종목 순서 / 삭제**")
             edited_df = st.data_editor(
                 my_stocks[['ticker', 'sort_order']], 
                 column_config={"ticker": st.column_config.TextColumn("종목", disabled=True), "sort_order": st.column_config.NumberColumn("순서", min_value=1, step=1)},
